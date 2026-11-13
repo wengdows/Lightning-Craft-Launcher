@@ -12349,10 +12349,13 @@ def version_newer(latest, current):
 
 
 def _pick_update_asset(assets):
-    """优先选 .py，其次 .exe，最后 .zip。"""
+    """按运行方式选择更新包：源码运行优先 .py，打包运行优先 .exe。"""
+    prefer = ((".exe", ".py", ".zip") if getattr(sys, "frozen", False)
+              else (".py", ".exe", ".zip"))
+
     def rank(a):
         name = str(a.get("name") or "").lower()
-        for i, ext in enumerate((".py", ".exe", ".zip")):
+        for i, ext in enumerate(prefer):
             if name.endswith(ext):
                 return i
         return 9
