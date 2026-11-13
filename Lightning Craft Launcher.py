@@ -12484,6 +12484,12 @@ def launcher_entry_path():
     return os.path.abspath(__file__)
 
 
+def _resource_path(*parts):
+    """打包后资源在 sys._MEIPASS 下，源码运行时在脚本同级目录。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
 _UPDATE_HELPER = r'''
 import os, sys, time, shutil, subprocess
 
@@ -12831,6 +12837,7 @@ class MainWindow(tk.Tk):
         self.minsize(1000, 660)
         self.maxsize(1000, 660)
         self.configure(bg=C("bg"))
+        self._apply_app_icon()
         self._anim = bool(cfg.get("enable_animations", True))
         self._key = ""
 
@@ -12877,6 +12884,21 @@ class MainWindow(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.switch_page("launch", animate=False)
         self.after(15, _pump_ui)
+
+    def _apply_app_icon(self):
+        ico = _resource_path("assets", "icon.ico")
+        png = _resource_path("assets", "icon.png")
+        try:
+            if sys.platform == "win32" and os.path.isfile(ico):
+                self.iconbitmap(ico)
+        except Exception:
+            pass
+        try:
+            if os.path.isfile(png):
+                self._icon_photo = tk.PhotoImage(file=png)
+                self.iconphoto(True, self._icon_photo)
+        except Exception:
+            pass
 
     def switch_page(self, key, animate=True):
         if key == self._key or key not in self.pages:

@@ -24,7 +24,7 @@ jobs:
           pip install pyinstaller requests minecraft-launcher-lib
 
       - name: Build EXE
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name LightningCraftLauncher "Lightning Craft Launcher.py"
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name LightningCraftLauncher --icon "assets/icon.ico" --add-data "assets/icon.png;assets" "Lightning Craft Launcher.py"
 
       - name: Show output
         run: dir dist
