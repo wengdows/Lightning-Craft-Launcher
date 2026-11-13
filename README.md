@@ -13,6 +13,12 @@
 - 三套主题、中英文界面
 - 启动器自动更新（基于 GitHub Releases）
 
+## 下载
+
+- Windows：到 [Releases](https://github.com/wengdows/Lightning-Craft-Launcher/releases/latest)
+  下载 `LightningCraftLauncher.exe`，双击即可运行（无需安装 Python）
+- 源码：下载 `Lightning Craft Launcher.py` 后按下面的方式运行
+
 ## 运行
 
 ```bash
