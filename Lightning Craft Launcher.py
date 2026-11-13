@@ -1703,6 +1703,8 @@ _EN = {
     "更新失败": "Update failed",
     "未找到 GitHub 仓库或还没有发布任何版本。":
         "GitHub repository not found or no release has been published yet.",
+    "GitHub 访问频率受限，请稍后再试。":
+        "GitHub rate limit reached. Please try again later.",
     "发布信息中没有版本号。": "The release has no version tag.",
     "新版本没有提供可用的更新文件。":
         "The new release provides no usable update file.",
@@ -12376,6 +12378,10 @@ class UpdateCheckThread(QThread):
             if r.status_code == 404:
                 self.failed.emit(_t("未找到 GitHub 仓库或还没有发布任何版本。"))
                 return
+            if r.status_code in (403, 429):
+                # 公共出口 IP 共享未认证配额时容易触发
+                self.failed.emit(_t("GitHub 访问频率受限，请稍后再试。"))
+                return
             r.raise_for_status()
             data = r.json() or {}
             tag = str(data.get("tag_name") or data.get("name") or "").strip()
@@ -12595,7 +12601,7 @@ class UpdateDialog(BaseDialog):
             return
         self.btn_now.setEnabled(False)
         self.btn_later.setEnabled(False)
-        self.bar.pack(fill="x", pady=(0, 6))
+        self.bar.pack(fill="x", pady=(0, 6), before=self.status)
         self.bar.setValue(0)
         self.status.configure(text=_t("正在下载更新 ..."), fg=C("text2"))
         th = UpdateDownloadThread(self.info)
