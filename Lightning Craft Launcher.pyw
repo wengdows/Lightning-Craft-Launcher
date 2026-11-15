@@ -5608,7 +5608,8 @@ class ScrollFrame(tk.Frame):
         super().__init__(parent, bg=_resolve(bg))
         self._bg_role = bg
         style(self, bg=bg)
-        self.canvas = tk.Canvas(self, bg=_resolve(bg), highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(self, bg=_resolve(bg), highlightthickness=0, bd=0,
+                                yscrollincrement=12)
         self.vbar = _mk_scrollbar(self, self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vbar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -5639,8 +5640,13 @@ class ScrollFrame(tk.Frame):
         self.canvas.itemconfigure(self._win, width=e.width)
 
     def _wheel(self, e):
-        delta = -1 if getattr(e, "delta", 0) > 0 else 1
-        self.canvas.yview_scroll(delta, "units")
+        # 按滚动量换算成固定像素（yscrollincrement=12），滚轮/触控板都更平顺，
+        # 不再一跳就是视口的十分之一。
+        d = getattr(e, "delta", 0)
+        if not d:
+            return
+        steps = int(d / 120) if abs(d) >= 120 else (1 if d < 0 else -1)
+        self.canvas.yview_scroll(-steps * 3, "units")
 
     def _on_theme(self):
         self.configure(bg=_resolve(self._bg_role))
@@ -8399,30 +8405,108 @@ _MR_LOADER_NAMES = {
     "optifine": "OptiFine", "iris": "Iris", "canvas": "Canvas",
 }
 
+# ---------- 共用连接池与接口缓存 ----------
+# 搜索、详情、图标都复用同一个 Session：省掉每次请求重新做 DNS / TLS 握手，
+# 这是“点一下要等一会儿”的主要来源之一。
+_HTTP_SESSION = None
+_HTTP_SESSION_LOCK = threading.Lock()
+
+
+def _http_session():
+    global _HTTP_SESSION
+    if _HTTP_SESSION is not None:
+        return _HTTP_SESSION
+    with _HTTP_SESSION_LOCK:
+        if _HTTP_SESSION is None:
+            import requests
+            from requests.adapters import HTTPAdapter
+            s = requests.Session()
+            try:
+                adapter = HTTPAdapter(pool_connections=16, pool_maxsize=24,
+                                      max_retries=1)
+                s.mount("https://", adapter)
+                s.mount("http://", adapter)
+            except Exception:
+                pass
+            s.headers.update({"User-Agent": _MR_HEADERS["User-Agent"]})
+            _HTTP_SESSION = s
+    return _HTTP_SESSION
+
+
+# 接口结果短时缓存：列表↔详情来回切换、重复搜索同一关键词时直接命中，
+# 不再等网络（PCL 的浏览页也是这种“先给缓存、后台再刷新”的思路）。
+_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+_CACHE_MAX = 240
+
+
+def _cache_get(key):
+    with _CACHE_LOCK:
+        item = _CACHE.get(key)
+        if not item:
+            return None
+        expire, value = item
+        if expire < time.time():
+            _CACHE.pop(key, None)
+            return None
+        return value
+
+
+def _cache_put(key, value, ttl=300):
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _CACHE_MAX:
+            now = time.time()
+            for k in [k for k, (exp, _v) in _CACHE.items() if exp < now]:
+                _CACHE.pop(k, None)
+            while len(_CACHE) >= _CACHE_MAX:
+                _CACHE.pop(next(iter(_CACHE)), None)
+        _CACHE[key] = (time.time() + ttl, value)
+
+
+def _cached_fetch(key, ttl, fn):
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit
+    value = fn()
+    _cache_put(key, value, ttl)
+    return value
+
 
 def _mr_request(method, path, params=None, payload=None, timeout=25):
-    import requests
-    r = requests.request(method, _MODRINTH_API + path, params=params,
-                         json=payload, headers=_MR_HEADERS, timeout=timeout)
+    sess = _http_session()
+    url = _MODRINTH_API + path
+    if method.upper() == "GET":
+        r = sess.get(url, params=params, headers=_MR_HEADERS, timeout=timeout)
+    else:
+        r = sess.request(method, url, params=params, json=payload,
+                         headers=_MR_HEADERS, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
 
 def _mr_search(project_type, query, offset=0, limit=20, loader=None):
-    facets = [["project_type:%s" % project_type]]
-    if loader:
-        facets.append(["categories:%s" % loader])
-    return _mr_request("GET", "/search", {
-        "query": query or "", "offset": int(offset), "limit": int(limit),
-        "facets": json.dumps(facets), "index": "relevance"})
+    def _fetch():
+        facets = [["project_type:%s" % project_type]]
+        if loader:
+            facets.append(["categories:%s" % loader])
+        return _mr_request("GET", "/search", {
+            "query": query or "", "offset": int(offset), "limit": int(limit),
+            "facets": json.dumps(facets), "index": "relevance"},
+            timeout=18)
+    key = ("mr_search", project_type, query or "", int(offset), int(limit),
+           loader or "")
+    return _cached_fetch(key, 300, _fetch)
 
 
 def _mr_project(pid):
-    return _mr_request("GET", "/project/" + str(pid))
+    return _cached_fetch(("mr_project", str(pid)), 600,
+                         lambda: _mr_request("GET", "/project/" + str(pid)))
 
 
 def _mr_versions(pid):
-    return _mr_request("GET", "/project/%s/version" % pid)
+    return _cached_fetch(
+        ("mr_versions", str(pid)), 180,
+        lambda: _mr_request("GET", "/project/%s/version" % pid))
 
 
 def _mr_projects(ids):
@@ -8457,6 +8541,8 @@ _CF_GAME_ID = 432
 _CF_CLASS_IDS = {"mod": 6, "shader": 6552, "modpack": 4471}
 _CF_LOADER_NAMES = {"forge": "Forge", "fabric": "Fabric", "quilt": "Quilt",
                     "neoforge": "NeoForge", "liteloader": "LiteLoader"}
+# 记住上一次成功的免 Key 通道，后续请求直接命中，不再每个请求都先试失败的源
+_CF_WORKING = None
 
 
 def _cf_key():
@@ -8467,24 +8553,32 @@ def _cf_key():
 
 
 def _cf_request(path, params=None, timeout=25):
-    import requests
+    sess = _http_session()
     key = _cf_key()
     if key:
         # 填了 Key 只走官方接口
-        r = requests.get(_CF_API + path, params=params,
-                         headers={"x-api-key": key,
-                                  "User-Agent": "LCL-Launcher/1.0.1"},
-                         timeout=timeout)
+        r = sess.get(_CF_API + path, params=params,
+                     headers={"x-api-key": key,
+                              "User-Agent": "LCL-Launcher/1.0.1"},
+                     timeout=timeout)
         r.raise_for_status()
         return r.json()
     # 未填 Key：依次尝试免 Key 公共通道，任一可用即返回
+    global _CF_WORKING
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    last_err = None
+    bases = []
+    if _CF_WORKING:
+        bases.append(_CF_WORKING)
     for base in (_CF_PROXY, _CF_PROXY2):
+        if base not in bases:
+            bases.append(base)
+    last_err = None
+    for base in bases:
         try:
-            r = requests.get(base + path, params=params, headers=headers,
-                             timeout=12)
+            r = sess.get(base + path, params=params, headers=headers,
+                         timeout=12)
             r.raise_for_status()
+            _CF_WORKING = base
             return r.json()
         except Exception as e:
             last_err = e
@@ -8513,95 +8607,146 @@ def _cf_hit(m):
 
 
 def _cf_search(project_type, query, offset=0, limit=20):
-    data = _cf_request("/mods/search", {
-        "gameId": _CF_GAME_ID,
-        "classId": _CF_CLASS_IDS.get(project_type, 6),
-        "searchFilter": query or "", "pageSize": int(limit),
-        "index": int(offset), "sortField": 2, "sortOrder": "desc"})
-    hits = [_cf_hit(m) for m in data.get("data") or []]
-    total = int((data.get("pagination") or {}).get("totalCount") or len(hits))
-    return {"hits": hits, "total_hits": total}
+    def _fetch():
+        data = _cf_request("/mods/search", {
+            "gameId": _CF_GAME_ID,
+            "classId": _CF_CLASS_IDS.get(project_type, 6),
+            "searchFilter": query or "", "pageSize": int(limit),
+            "index": int(offset), "sortField": 2, "sortOrder": "desc"})
+        hits = [_cf_hit(m) for m in data.get("data") or []]
+        total = int((data.get("pagination") or {}).get("totalCount")
+                    or len(hits))
+        return {"hits": hits, "total_hits": total}
+    key = ("cf_search", project_type, query or "", int(offset), int(limit))
+    return _cached_fetch(key, 300, _fetch)
 
 
 def _cf_project(mod_id):
-    m = (_cf_request("/mods/%s" % mod_id).get("data")) or {}
-    authors = [a.get("name") for a in (m.get("authors") or []) if a.get("name")]
-    return {"id": str(m.get("id") or ""),
-            "title": m.get("name") or "?",
-            "slug": m.get("slug") or "",
-            "loaders": _cf_mod_loaders(m),
-            "description": m.get("summary") or "",
-            "downloads": m.get("downloadCount"),
-            "icon_url": (m.get("logo") or {}).get("thumbnailUrl") or "",
-            "project_type": "mod",
-            "authors": authors,
-            "cf_page": (m.get("links") or {}).get("websiteUrl") or ""}
+    def _fetch():
+        m = (_cf_request("/mods/%s" % mod_id).get("data")) or {}
+        authors = [a.get("name") for a in (m.get("authors") or [])
+                   if a.get("name")]
+        return {"id": str(m.get("id") or ""),
+                "title": m.get("name") or "?",
+                "slug": m.get("slug") or "",
+                "loaders": _cf_mod_loaders(m),
+                "description": m.get("summary") or "",
+                "downloads": m.get("downloadCount"),
+                "icon_url": (m.get("logo") or {}).get("thumbnailUrl") or "",
+                "project_type": "mod",
+                "authors": authors,
+                "cf_page": (m.get("links") or {}).get("websiteUrl") or ""}
+    return _cached_fetch(("cf_project", str(mod_id)), 600, _fetch)
 
 
 def _cf_versions(mod_id, limit=300):
-    files, index = [], 0
-    while len(files) < limit:
+    def _fetch():
         data = _cf_request("/mods/%s/files" % mod_id,
-                           {"pageSize": 50, "index": index})
-        batch = data.get("data") or []
-        files.extend(batch)
-        if len(batch) < 50:
-            break
-        index += 50
-    vers = []
-    for f in files:
-        gvs, loaders = [], []
-        for g in f.get("gameVersions") or []:
-            gl = str(g).lower()
-            if gl in _CF_LOADER_NAMES:
-                if gl not in loaders:
-                    loaders.append(gl)
-            elif re.match(r"^\d", str(g)) and str(g) not in gvs:
-                gvs.append(str(g))
-        deps = []
-        for d in f.get("dependencies") or []:
-            if d.get("modId"):
-                deps.append({
-                    "project_id": str(d["modId"]),
-                    "dependency_type": ("required"
-                                        if d.get("relationType") == 1
-                                        else "optional")})
-        vers.append({
-            "id": str(f.get("id") or ""),
-            "version_number": (f.get("displayName") or f.get("fileName")
-                               or "?"),
-            "name": f.get("displayName") or "",
-            "game_versions": gvs,
-            "loaders": loaders,
-            "date_published": f.get("fileDate") or "",
-            "files": [{"primary": True,
-                       "url": f.get("downloadUrl") or "",
-                       "filename": f.get("fileName") or "mod.jar",
-                       "size": f.get("fileLength") or 0}],
-            "dependencies": deps,
-            "_cf_mod_id": str(mod_id),
-            "_cf_file_id": str(f.get("id") or ""),
-        })
-    return vers
+                           {"pageSize": 50, "index": 0})
+        files = list(data.get("data") or [])
+        try:
+            total = int((data.get("pagination") or {}).get("totalCount") or 0)
+        except Exception:
+            total = 0
+        if total > len(files):
+            # 知道总数就并行走剩下的页，避免一页一页串行等（最多 6 页 ≈ 300 条）
+            want = min(int(limit), total)
+            offsets = list(range(50, want, 50))
+            if offsets:
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _page(idx):
+                    try:
+                        d = _cf_request("/mods/%s/files" % mod_id,
+                                        {"pageSize": 50, "index": idx})
+                        return idx, list(d.get("data") or [])
+                    except Exception:
+                        return idx, []
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    pages = list(ex.map(_page, offsets))
+                for _idx, batch in sorted(pages):
+                    files.extend(batch)
+        elif not total:
+            # 代理没返回分页信息时退回逐页拉取（旧行为）
+            index = 50
+            while len(files) < limit:
+                try:
+                    d = _cf_request("/mods/%s/files" % mod_id,
+                                    {"pageSize": 50, "index": index})
+                except Exception:
+                    break
+                batch = list(d.get("data") or [])
+                files.extend(batch)
+                if len(batch) < 50:
+                    break
+                index += 50
+        del files[int(limit):]
+        vers = []
+        for f in files:
+            gvs, loaders = [], []
+            for g in f.get("gameVersions") or []:
+                gl = str(g).lower()
+                if gl in _CF_LOADER_NAMES:
+                    if gl not in loaders:
+                        loaders.append(gl)
+                elif re.match(r"^\d", str(g)) and str(g) not in gvs:
+                    gvs.append(str(g))
+            deps = []
+            for d in f.get("dependencies") or []:
+                if d.get("modId"):
+                    deps.append({
+                        "project_id": str(d["modId"]),
+                        "dependency_type": ("required"
+                                            if d.get("relationType") == 1
+                                            else "optional")})
+            vers.append({
+                "id": str(f.get("id") or ""),
+                "version_number": (f.get("displayName") or f.get("fileName")
+                                   or "?"),
+                "name": f.get("displayName") or "",
+                "game_versions": gvs,
+                "loaders": loaders,
+                "date_published": f.get("fileDate") or "",
+                "files": [{"primary": True,
+                           "url": f.get("downloadUrl") or "",
+                           "filename": f.get("fileName") or "mod.jar",
+                           "size": f.get("fileLength") or 0}],
+                "dependencies": deps,
+                "_cf_mod_id": str(mod_id),
+                "_cf_file_id": str(f.get("id") or ""),
+            })
+        return vers
+    return _cached_fetch(("cf_versions", str(mod_id), int(limit)), 180, _fetch)
 
 
 def _cf_projects(ids):
-    """批量取依赖项目的标题（逐个请求，数量限制在 30 个以内）。"""
-    out = []
+    """批量取依赖项目的标题（并发请求，数量限制在 30 个以内）。"""
     seen = []
     for x in ids:
         s = str(x)
         if s.isdigit() and s not in seen:
             seen.append(s)
-    for s in seen[:30]:
+    seen = seen[:30]
+    if not seen:
+        return []
+
+    def _one(s):
         try:
             m = (_cf_request("/mods/%s" % s).get("data")) or {}
             if m:
-                out.append({"id": str(m.get("id") or s),
-                            "title": m.get("name") or s,
-                            "slug": m.get("slug") or ""})
+                return {"id": str(m.get("id") or s),
+                        "title": m.get("name") or s,
+                        "slug": m.get("slug") or ""}
         except Exception:
-            continue
+            pass
+        return None
+
+    from concurrent.futures import ThreadPoolExecutor
+    out = []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for pr in ex.map(_one, seen):
+            if pr:
+                out.append(pr)
     return out
 
 
@@ -8732,9 +8877,23 @@ def instance_shader_dir(mc_dir, version):
                         "shaderpacks")
 
 
+_INSTANCES_CACHE = {"key": None, "time": 0.0, "value": []}
+
+
 def list_local_instances(mc_dir):
+    # 每次点版本都要重建下载位置列表：本地实例的 JSON 解析结果缓存几秒，
+    # 避免反复扫描 versions 目录造成点击后短暂无响应。
+    try:
+        vr = os.path.join(mc_dir, "versions")
+        key = (mc_dir, os.path.getmtime(vr))
+    except Exception:
+        vr = os.path.join(mc_dir, "versions")
+        key = (mc_dir, 0)
+    now = time.time()
+    cache = _INSTANCES_CACHE
+    if cache["key"] == key and now - cache["time"] < 10:
+        return list(cache["value"])
     out = []
-    vr = os.path.join(mc_dir, "versions")
     try:
         names = sorted(os.listdir(vr))
     except Exception:
@@ -8747,7 +8906,8 @@ def list_local_instances(mc_dir):
             continue
         out.append({"name": n, "mcver": mcver, "loader": loader,
                     "loader_version": lver})
-    return out
+    _INSTANCES_CACHE.update(key=key, time=now, value=out)
+    return list(out)
 
 
 def _loader_matches(instance_loader, version_loaders):
@@ -8783,10 +8943,9 @@ def _sha1_file(path):
 
 
 def _download_to(url, dest, on_progress=None):
-    import requests
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = dest + ".part"
-    r = requests.get(url, stream=True, headers=_MR_HEADERS, timeout=60)
+    r = _http_session().get(url, stream=True, headers=_MR_HEADERS, timeout=60)
     r.raise_for_status()
     try:
         total = int(r.headers.get("Content-Length") or 0)
@@ -8816,10 +8975,74 @@ def _download_to(url, dest, on_progress=None):
 
 
 # ---------- 图标异步加载 ----------
+# 图标原来是一条线程串行下载：20 个卡片要排队等 20 次网络。
+# 现在改成小并发池 + 内存/磁盘两级缓存 + PhotoImage 复用，
+# 第二次进入列表（甚至重启启动器）都能瞬间出图。
 _ICON_CACHE = {}
-_ICON_QUEUE = []
 _ICON_LOCK = threading.Lock()
-_ICON_RUNNING = False
+_ICON_INFLIGHT = {}
+_ICON_PHOTO_CACHE = {}
+_ICON_POOL = None
+_ICON_DIR = os.path.join(DATA_DIR, "cache", "icons")
+_ICON_DISK_MAX = 600
+_ICON_PRUNE_AT = 0.0
+
+
+def _icon_disk_path(url):
+    import hashlib
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest() + ".img"
+    return os.path.join(_ICON_DIR, name)
+
+
+def _icon_read_disk(url):
+    try:
+        with open(_icon_disk_path(url), "rb") as f:
+            return f.read() or None
+    except Exception:
+        return None
+
+
+def _icon_write_disk(url, data):
+    try:
+        os.makedirs(_ICON_DIR, exist_ok=True)
+        path = _icon_disk_path(url)
+        tmp = path + ".part"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _icon_prune_disk():
+    """图标缓存超过上限时删掉最旧的一批，避免目录无限膨胀。"""
+    global _ICON_PRUNE_AT
+    now = time.time()
+    if now - _ICON_PRUNE_AT < 30:
+        return
+    _ICON_PRUNE_AT = now
+    try:
+        names = [n for n in os.listdir(_ICON_DIR) if n.endswith(".img")]
+        if len(names) <= _ICON_DISK_MAX:
+            return
+        files = sorted(((os.path.getmtime(os.path.join(_ICON_DIR, n)), n)
+                        for n in names))
+        for _t, n in files[:len(files) - _ICON_DISK_MAX]:
+            try:
+                os.remove(os.path.join(_ICON_DIR, n))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _icon_pool():
+    global _ICON_POOL
+    if _ICON_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _ICON_POOL = ThreadPoolExecutor(max_workers=6,
+                                        thread_name_prefix="lcl-icon")
+    return _ICON_POOL
 
 
 def _icon_placeholder(canvas, letter, size):
@@ -8834,51 +9057,63 @@ def _icon_placeholder(canvas, letter, size):
 def load_icon_async(url, canvas, letter="?"):
     if not url:
         return
-    if url in _ICON_CACHE:
-        _paint_icon(canvas, _ICON_CACHE[url])
+    data = _ICON_CACHE.get(url)
+    if data is None:
+        data = _icon_read_disk(url)
+        if data is not None:
+            _ICON_CACHE[url] = data
+    if data is not None:
+        _paint_icon(canvas, data, url)
         return
-    global _ICON_RUNNING
     with _ICON_LOCK:
-        _ICON_QUEUE.append((url, canvas))
-        if _ICON_RUNNING:
+        waiters = _ICON_INFLIGHT.get(url)
+        if waiters is not None:
+            waiters.append(canvas)
             return
-        _ICON_RUNNING = True
-    threading.Thread(target=_icon_worker, daemon=True).start()
-
-
-def _icon_worker():
-    global _ICON_RUNNING
-    import requests
-    while True:
+        _ICON_INFLIGHT[url] = [canvas]
+    try:
+        _icon_pool().submit(_icon_fetch, url)
+    except Exception:
         with _ICON_LOCK:
-            if not _ICON_QUEUE:
-                _ICON_RUNNING = False
-                return
-            url, canvas = _ICON_QUEUE.pop(0)
-        try:
-            data = _ICON_CACHE.get(url)
-            if data is None:
-                r = requests.get(url, headers=_MR_HEADERS, timeout=15)
-                r.raise_for_status()
-                data = r.content
-                _ICON_CACHE[url] = data
-            _ui_call(_paint_icon, canvas, data)
-        except Exception:
-            pass
+            _ICON_INFLIGHT.pop(url, None)
 
 
-def _paint_icon(canvas, data):
+def _icon_fetch(url):
+    data = None
+    try:
+        r = _http_session().get(url, headers=_MR_HEADERS, timeout=12)
+        r.raise_for_status()
+        data = r.content
+    except Exception:
+        data = None
+    if data:
+        _ICON_CACHE[url] = data
+        _icon_write_disk(url, data)
+        _icon_prune_disk()
+    with _ICON_LOCK:
+        canvases = _ICON_INFLIGHT.pop(url, [])
+    if data:
+        for c in canvases:
+            _ui_call(_paint_icon, c, data, url)
+
+
+def _paint_icon(canvas, data, url=None):
     try:
         if not canvas.winfo_exists():
             return
         tw = int(canvas.cget("width"))
         th = int(canvas.cget("height"))
-        img = tk.PhotoImage(data=data)
-        limit = max(8, min(tw, th))
-        scale = int(round(max(img.width(), img.height()) / limit))
-        k = max(1, scale)
-        if k > 1:
-            img = img.subsample(k, k)
+        key = (url, tw, th)
+        img = _ICON_PHOTO_CACHE.get(key) if url else None
+        if img is None:
+            img = tk.PhotoImage(data=data)
+            limit = max(8, min(tw, th))
+            scale = int(round(max(img.width(), img.height()) / limit))
+            k = max(1, scale)
+            if k > 1:
+                img = img.subsample(k, k)
+            if url:
+                _ICON_PHOTO_CACHE[key] = img
         canvas.delete("all")
         canvas.create_image(tw / 2, th / 2, image=img)
         canvas._icon_photo = img
@@ -8934,6 +9169,9 @@ class StoreView(tk.Frame):
         self._gv = ""
         self._gv_btns = {}
         self._matches = []
+        self._card_count = 0
+        self._render_token = 0
+        self._ver_token = 0
         self._build_ui()
 
     # ---------- 浏览列表 ----------
@@ -9014,16 +9252,24 @@ class StoreView(tk.Frame):
         if not append:
             self._offset = 0
             self._hits = []
+            # 立即清掉旧卡片：把“清空”和“重建”拆开，结果回来时就不会
+            # 因为一次性销毁几十个控件而整体卡一下
+            self._render_token = getattr(self, "_render_token", 0) + 1
+            self._card_count = 0
+            try:
+                self.scroll.clear()
+            except Exception:
+                pass
         self._loading = True
         self.more_btn.setEnabled(False)
         self.status.configure(text=_t("正在获取列表 ..."), fg=C("muted"))
         ptype, off, q = self.project_type, self._offset, self._query
         src = self.source
 
-        def _ok(data, _src=src):
+        def _ok(data, _src=src, _append=append):
             if _src != self.source:
                 return  # 来源已切换，丢弃过期结果
-            self._on_search_ok(data)
+            self._on_search_ok(data, _append)
 
         def _err(err, _src=src):
             if _src != self.source:
@@ -9037,7 +9283,7 @@ class StoreView(tk.Frame):
             _run_bg(lambda: _mr_search(ptype, q, offset=off, limit=20),
                     _ok, _err)
 
-    def _on_search_ok(self, data):
+    def _on_search_ok(self, data, append=False):
         self._loading = False
         self._loaded = True
         hits = data.get("hits") or []
@@ -9047,7 +9293,7 @@ class StoreView(tk.Frame):
         self.status.configure(text="%s：%d / %d" % (_t("找到"), len(self._hits), total),
                               fg=C("muted"))
         self.more_btn.setEnabled(bool(hits) and self._offset < total)
-        self._render_hits()
+        self._render_hits(append)
 
     def _on_search_err(self, err):
         self._loading = False
@@ -9058,11 +9304,33 @@ class StoreView(tk.Frame):
         self.status.configure(text=_t("获取失败：") + msg, fg=C("red1"))
         self.more_btn.setEnabled(True)
 
-    def _render_hits(self):
-        self.scroll.clear()
-        for idx, hit in enumerate(self._hits):
-            card = self._make_card(hit)
-            card.grid(row=idx // 3, column=idx % 3, padx=5, pady=5, sticky="nsew")
+    def _render_hits(self, append=False):
+        if not append:
+            try:
+                self.scroll.clear()
+            except Exception:
+                pass
+            self._card_count = 0
+        self._render_token = getattr(self, "_render_token", 0) + 1
+        # 分批绘制：先出前几张卡片，剩下的交给事件循环慢慢补，
+        # 加载更多时不再把已有卡片全部重建一遍（PCL 的列表也是渐进出图）。
+        self._render_cards(min(self._card_count, len(self._hits)),
+                           self._render_token)
+
+    def _render_cards(self, start, token):
+        if token != self._render_token:
+            return
+        end = min(start + 6, len(self._hits))
+        for idx in range(start, end):
+            card = self._make_card(self._hits[idx])
+            card.grid(row=idx // 3, column=idx % 3, padx=5, pady=5,
+                      sticky="nsew")
+        self._card_count = end
+        if end < len(self._hits):
+            try:
+                self.after(1, lambda: self._render_cards(end, token))
+            except Exception:
+                pass
 
     def _make_card(self, hit):
         title = hit.get("title") or hit.get("slug") or "?"
@@ -9111,6 +9379,7 @@ class StoreView(tk.Frame):
                                      fg=C("muted"))
         for w in self.detail_body.winfo_children():
             w.destroy()
+        self._detail_token = getattr(self, "_detail_token", 0) + 1
         src = self.source
 
         def _ok(data, _pid=pid, _src=src):
@@ -9126,9 +9395,14 @@ class StoreView(tk.Frame):
         _run_bg(lambda: self._fetch_project(pid), _ok, _err)
 
     def _fetch_project(self, pid):
+        # 项目信息、版本列表、作者（Modrinth）互不依赖，并行请求，
+        # 打开详情页的等待时间从“几段相加”变成“取最慢的一段”。
+        from concurrent.futures import ThreadPoolExecutor
         if self.source == "curseforge":
-            p = _cf_project(pid)
-            vers = _cf_versions(pid)
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fp = ex.submit(_cf_project, pid)
+                fv = ex.submit(_cf_versions, pid)
+                p, vers = fp.result(), fv.result()
             dep_ids = set()
             for v in vers:
                 for d in v.get("dependencies") or []:
@@ -9141,8 +9415,11 @@ class StoreView(tk.Frame):
             except Exception:
                 pass
             return p, vers, deps, p.get("authors") or []
-        p = _mr_project(pid)
-        vers = _mr_versions(pid)
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            fp = ex.submit(_mr_project, pid)
+            fv = ex.submit(_mr_versions, pid)
+            fm = ex.submit(_mr_members, pid)
+            p, vers, members = fp.result(), fv.result(), fm.result()
         dep_ids = set()
         for v in vers:
             for d in v.get("dependencies") or []:
@@ -9154,7 +9431,6 @@ class StoreView(tk.Frame):
                 deps[pr["id"]] = pr
         except Exception:
             pass
-        members = _mr_members(pid)
         return p, vers, deps, members
 
     def _build_detail(self):
@@ -9249,17 +9525,8 @@ class StoreView(tk.Frame):
             anchor="w", pady=(14, 4))
         chips = tk.Frame(body, bg=C("bg"))
         chips.pack(fill="x")
+        self.gv_chips = chips
         self._gv_btns = {}
-        row = col = 0
-        for gv in self._game_versions:
-            b = FlatButton(chips, gv, lambda g=gv: self.select_game_version(g),
-                           bg="card", fg="text", hover="border", padx=8,
-                           pady=3, font_size=10)
-            b.grid(row=row, column=col, padx=3, pady=3)
-            self._gv_btns[gv] = b
-            col += 1
-            if col >= 10:
-                col, row = 0, row + 1
         self.ver_title = tk.Label(body, text="", bg=C("bg"), fg=C("text"),
                                   font=F(13, True), anchor="w")
         self.ver_title.pack(fill="x", pady=(14, 4))
@@ -9267,7 +9534,31 @@ class StoreView(tk.Frame):
         self.ver_box.pack(fill="x")
         self.target_box = tk.Frame(body, bg=C("bg"))
         self.target_box.pack(fill="x", pady=(12, 0))
-        if self._game_versions:
+        # 游戏版本芯片可能有上百个，分批创建，避免详情页瞬间卡住
+        self._detail_token = getattr(self, "_detail_token", 0) + 1
+        self._render_gv_chips(0, self._detail_token)
+
+    def _render_gv_chips(self, start, token):
+        if token != getattr(self, "_detail_token", 0):
+            return
+        try:
+            end = min(start + 16, len(self._game_versions))
+            for i in range(start, end):
+                gv = self._game_versions[i]
+                b = FlatButton(self.gv_chips, gv,
+                               lambda g=gv: self.select_game_version(g),
+                               bg="card", fg="text", hover="border", padx=8,
+                               pady=3, font_size=10)
+                b.grid(row=i // 10, column=i % 10, padx=3, pady=3)
+                self._gv_btns[gv] = b
+        except Exception:
+            return
+        if end < len(self._game_versions):
+            try:
+                self.after(1, lambda: self._render_gv_chips(end, token))
+            except Exception:
+                pass
+        elif self._game_versions:
             self.select_game_version(self._game_versions[0])
         else:
             self.ver_title.configure(text=_t("暂无可用版本"))
@@ -9283,6 +9574,7 @@ class StoreView(tk.Frame):
                            reverse=True)
         self.ver_title.configure(
             text="%s %s：%d" % (gv, _t("可用版本"), len(self._matches)))
+        self._ver_token = getattr(self, "_ver_token", 0) + 1
         for w in self.ver_box.winfo_children():
             w.destroy()
         for w in self.target_box.winfo_children():
@@ -9291,8 +9583,20 @@ class StoreView(tk.Frame):
             tk.Label(self.ver_box, text=_t("该游戏版本下暂无可用版本。"),
                      bg=C("bg"), fg=C("muted"), font=F(11)).pack(anchor="w")
             return
-        for ver in self._matches:
+        # 版本多时（例如 30+）分批插入，避免点一下芯片界面就顿住
+        self._render_version_rows(0, self._ver_token)
+
+    def _render_version_rows(self, start, token):
+        if token != getattr(self, "_ver_token", 0):
+            return
+        end = min(start + 8, len(self._matches))
+        for ver in self._matches[start:end]:
             self._make_version_row(ver)
+        if end < len(self._matches):
+            try:
+                self.after(1, lambda: self._render_version_rows(end, token))
+            except Exception:
+                pass
 
     def _make_version_row(self, ver):
         row = RoundedCard(self.ver_box, radius=8, padx=10, pady=7,
