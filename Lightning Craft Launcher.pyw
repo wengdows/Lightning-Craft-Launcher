@@ -2239,6 +2239,60 @@ def offline_uuid(name):
     return str(_uuid.UUID(bytes=bytes(b)))
 
 
+def list_version_folders(mc_dir):
+    """列出 versions 下有效的版本文件夹（必须存在 <name>/<name>.json）。
+
+    统一按「文件夹名」识别版本：从 PCL 等启动器拖入的版本，JSON 里的 id
+    可能与文件夹名不同，按 id 识别会列出并不存在的版本，启动时反而会
+    重新下载出一个新版本。
+    """
+    vr = os.path.join(mc_dir, "versions")
+    out = set()
+    try:
+        for n in os.listdir(vr):
+            if os.path.isfile(os.path.join(vr, n, n + ".json")):
+                out.add(n)
+    except Exception:
+        pass
+    return out
+
+
+def normalize_version_id(mc_dir, version):
+    """把版本 JSON 的 id 修正为文件夹名，避免补全/启动时多出一个版本。
+
+    本启动器（以及 minecraft-launcher-lib）都按 JSON 的 id 拼路径；如果
+    从别的启动器拖进来的版本 id 与文件夹名不一致，补全时会把 jar 写到
+    versions/<id>/，看起来就“变成了一个新版本”。这里提前对齐。
+    """
+    if not _validate_version_name(version)[0]:
+        return False
+    jf = os.path.join(mc_dir, "versions", version, version + ".json")
+    try:
+        if not os.path.isfile(jf):
+            return False
+        with open(jf, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    old = str(data.get("id") or "")
+    if old == version:
+        return False
+    data["id"] = version
+    if old and data.get("jar") == old:
+        data["jar"] = version
+    try:
+        tmp = jf + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, jf)
+        return True
+    except Exception:
+        return False
+
+
 def rename_version_dir(mc_dir, old_name, new_name):
     ok, err = _validate_version_name(new_name)
     if not ok:
@@ -7231,13 +7285,10 @@ class LaunchPage(Page):
     # ---------- 版本 ----------
     def _version_names(self):
         mc = load_config().get("minecraft_directory", "")
+        # 以版本文件夹名为准：JSON 里的 id 可能被其他启动器改过，
+        # 按 id 列表会显示出一个并不存在的版本
         names = set(load_versions().get("versions", []))
-        try:
-            import minecraft_launcher_lib
-            names |= {v["id"] for v in
-                      minecraft_launcher_lib.utils.get_installed_versions(mc)}
-        except Exception:
-            pass
+        names |= list_version_folders(mc)
         return sorted(names, key=_natural_version_key, reverse=True)
 
     def refresh_versions(self):
@@ -7586,6 +7637,9 @@ class LaunchPage(Page):
         mp = (self.config.get("modpack_instances") or {}).get(v) or {}
         launch_v = mp.get("launch_version") or v
         game_dir = os.path.join(mc, mp["dir"]) if mp.get("dir") else mc
+        # 从其他启动器拖入的版本，JSON 的 id 可能与文件夹名不同；
+        # 不对齐的话补全时会按 id 写出一个“新版本”，这里先修正
+        fixed_id = normalize_version_id(mc, launch_v)
         issue = version_json_issue(mc, launch_v)
         if issue:
             alert(self, _t("无法启动"),
@@ -7596,6 +7650,9 @@ class LaunchPage(Page):
         key = self._proc_seq
         self._create_log_page(key, self._proc_label(v), v, game_dir)
         self._append_log(_t("开始启动游戏。"), key)
+        if fixed_id:
+            self._append_log(_t("已把版本 JSON 的 id 修正为文件夹名「%s」，"
+                                "避免启动时生成重复版本。") % launch_v, key)
         self._append_log(_t("版本: ") + v, key)
         self._append_log(_t("账号: ") + acc.get("name", "?"), key)
         tm = {"offline": _t("离线"), "microsoft": _t("正版"),
@@ -8221,13 +8278,10 @@ class ManagePage(Page):
 
     def _version_names(self):
         mc = load_config().get("minecraft_directory", "")
+        # 以版本文件夹名为准：JSON 里的 id 可能被其他启动器改过，
+        # 按 id 列表会显示出一个并不存在的版本
         names = set(load_versions().get("versions", []))
-        try:
-            import minecraft_launcher_lib
-            names |= {v["id"] for v in
-                      minecraft_launcher_lib.utils.get_installed_versions(mc)}
-        except Exception:
-            pass
+        names |= list_version_folders(mc)
         return sorted(names, key=_natural_version_key, reverse=True)
 
     def refresh(self):
