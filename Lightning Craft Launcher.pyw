@@ -136,9 +136,13 @@ _setup_exe_logging()
 # ============ 依赖检测（tkinter） ============
 _PKG_MAP = {"requests": "requests",
             "minecraft_launcher_lib": "minecraft-launcher-lib",
-            "send2trash": "send2trash"}
+            "send2trash": "send2trash",
+            "PIL": "Pillow"}
 
 def _check_missing():
+    if getattr(sys, "frozen", False):
+        # 打包后的 EXE 已内嵌依赖，无需再检测/安装到 data/dependencies
+        return [], []
     mm, mp = [], []
     for mod, pip_name in _PKG_MAP.items():
         try:
@@ -177,7 +181,8 @@ def _dep_window_tk(missing_mods, missing_pips):
         tk.Label(info, text="• " + m, font=("Microsoft YaHei", 11),
                  fg="#cdd6f4", bg="#2b2b3a", anchor="w").pack(fill=tk.X, pady=1)
     # 估算缺失依赖的下载体积（含 pip 依赖链），让用户有心理预期
-    _est_mb = {"requests": 1, "minecraft_launcher_lib": 2, "send2trash": 1}
+    _est_mb = {"requests": 1, "minecraft_launcher_lib": 2, "send2trash": 1,
+               "PIL": 4}
     _total_mb = sum(_est_mb.get(m, 5) for m in missing_mods)
     tk.Label(info, text=_t("预计需要下载约 %d MB") % _total_mb,
              font=("Microsoft YaHei", 10), fg="#89b4fa", bg="#2b2b3a",
@@ -9078,12 +9083,29 @@ def load_icon_async(url, canvas, letter="?"):
             _ICON_INFLIGHT.pop(url, None)
 
 
+def _icon_display_bytes(data):
+    """Tk 只能显示 PNG/GIF；WebP、JPEG 等格式用 Pillow 转成 PNG。"""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" or data[:4] == b"GIF8":
+        return data
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            if im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGBA")
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception:
+        return None
+
+
 def _icon_fetch(url):
     data = None
     try:
         r = _http_session().get(url, headers=_MR_HEADERS, timeout=12)
         r.raise_for_status()
-        data = r.content
+        data = _icon_display_bytes(r.content)
     except Exception:
         data = None
     if data:

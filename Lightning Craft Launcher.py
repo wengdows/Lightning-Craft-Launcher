@@ -69,12 +69,80 @@ except Exception:
 if os.path.isdir(LIBRARIES_DIR) and LIBRARIES_DIR not in sys.path:
     sys.path.insert(0, LIBRARIES_DIR)
 
+# ============ 运行日志（便于定位“程序突然退出”等问题） ============
+LOG_FILE = os.path.join(DATA_DIR, "launcher.log")
+
+def _log_write(text):
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write("[%s] %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                   text))
+    except Exception:
+        pass
+
+def _log_exc(prefix="异常"):
+    """记录异常堆栈；打包成无控制台 EXE 时也不会因为写入 stderr 报错。"""
+    try:
+        text = traceback.format_exc()
+    except Exception:
+        text = "（无法获取异常堆栈）"
+    _log_write("%s:\n%s" % (prefix, text))
+    try:
+        if sys.stderr is not None:
+            sys.stderr.write(text)
+    except Exception:
+        pass
+
+def _setup_exe_logging():
+    """PyInstaller --windowed 下 sys.stdout/stderr 为 None，统一重定向到日志文件。"""
+    global _FAULT_FILE
+    try:
+        if sys.stdout is None or sys.stderr is None:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            f = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+            if sys.stdout is None:
+                sys.stdout = f
+            if sys.stderr is None:
+                sys.stderr = f
+    except Exception:
+        pass
+
+    # 进程级崩溃（例如 Tcl/Tk 或原生库导致的闪退）也会写进日志
+    try:
+        import faulthandler
+        os.makedirs(DATA_DIR, exist_ok=True)
+        _FAULT_FILE = open(os.path.join(DATA_DIR, "crash.log"),
+                           "a", encoding="utf-8", buffering=1)
+        faulthandler.enable(file=_FAULT_FILE, all_threads=True)
+        _log_write("运行环境：Python %s / %s" % (sys.version.split()[0], sys.platform))
+    except Exception:
+        pass
+
+    def _thread_hook(args):
+        try:
+            text = "".join(traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback))
+        except Exception:
+            text = "（无法获取异常堆栈）"
+        _log_write("后台线程 %s 异常:\n%s" % (
+            getattr(args.thread, "name", "?"), text))
+    try:
+        threading.excepthook = _thread_hook
+    except Exception:
+        pass
+
+_setup_exe_logging()
+
 # ============ 依赖检测（tkinter） ============
 _PKG_MAP = {"requests": "requests",
             "minecraft_launcher_lib": "minecraft-launcher-lib",
-            "send2trash": "send2trash"}
+            "send2trash": "send2trash",
+            "PIL": "Pillow"}
 
 def _check_missing():
+    if getattr(sys, "frozen", False):
+        # 打包后的 EXE 已内嵌依赖，无需再检测/安装到 data/dependencies
+        return [], []
     mm, mp = [], []
     for mod, pip_name in _PKG_MAP.items():
         try:
@@ -113,7 +181,8 @@ def _dep_window_tk(missing_mods, missing_pips):
         tk.Label(info, text="• " + m, font=("Microsoft YaHei", 11),
                  fg="#cdd6f4", bg="#2b2b3a", anchor="w").pack(fill=tk.X, pady=1)
     # 估算缺失依赖的下载体积（含 pip 依赖链），让用户有心理预期
-    _est_mb = {"requests": 1, "minecraft_launcher_lib": 2, "send2trash": 1}
+    _est_mb = {"requests": 1, "minecraft_launcher_lib": 2, "send2trash": 1,
+               "PIL": 4}
     _total_mb = sum(_est_mb.get(m, 5) for m in missing_mods)
     tk.Label(info, text=_t("预计需要下载约 %d MB") % _total_mb,
              font=("Microsoft YaHei", 10), fg="#89b4fa", bg="#2b2b3a",
@@ -769,6 +838,7 @@ _EN = {
     "基于 StellarFRP 把本地游戏映射到公网，好友可直接加入。":
         "Map your local game to the public Internet via StellarFRP so friends can join directly.",
     "流量": "Traffic",
+    "总量": "Total",
     "流量信息不可用": "Traffic info unavailable",
     "自动签到成功": "Auto check-in succeeded",
     "签到失败": "Check-in failed",
@@ -1180,8 +1250,8 @@ _EN = {
         "Please upgrade: pip install -U minecraft-launcher-lib",
     "minecraft-launcher-lib 版本过低（需 8.0+），请先升级":
         "minecraft-launcher-lib is too old (8.0+ required). Please upgrade first.",
-    "未检测到 Java，Forge/NeoForge 安装器需要 Java，请在设置中指定 Java 路径":
-        "Java not found. The Forge/NeoForge installer requires Java; "
+    "未检测到 Java，安装模组加载器需要 Java，请在设置中指定 Java 路径":
+        "Java not found. Installing a mod loader requires Java; "
         "please set the Java path in Settings.",
     "NeoForge 安装器下载失败：%s": "Failed to download the NeoForge installer: %s",
     "检测到 %d 个库文件缺失（如 %s），正在自动补全 ...":
@@ -1623,6 +1693,14 @@ _EN = {
     "客户端无法运行：": "The client could not run: ",
     "FRPC 已退出（错误码 %d）": "FRPC exited (error code %d)",
     "已断开隧道连接。": "Tunnel disconnected.",
+    "重新下载": "Re-download",
+    "隧道数据异常，请刷新重试。":
+        "Invalid tunnel data; refresh and try again.",
+    "已有隧道正在运行，请先断开连接。":
+        "A tunnel is already running; disconnect it first.",
+    "隧道已停止。": "Tunnel stopped.",
+    "隧道已停止": "Tunnel stopped",
+    "连接失败": "Connection failed",
     "确定退出恒星账号登录吗？": "Sign out of your Stellar account?",
     "版本 1.0.1  ·  Python + tkinter": "Version 1.0.1  ·  Python + tkinter",
     "一个简洁的 Minecraft 启动器\n支持多账号、模组加载器与联机":
@@ -2699,7 +2777,9 @@ def patch_requests_mirror():
     _orig_session_get = requests.Session.get
 
     def _prep(url, kwargs):
-        if _download_cancelled.is_set():
+        target = _rewrite_mirror_url(url)
+        # 取消标记只拦截原版资源请求；联机、更新、模组 API 等其它请求不受影响
+        if _download_cancelled.is_set() and target != url:
             raise RuntimeError("下载已取消")
         # mll 的下载请求没有超时，断网时会永久挂起，这里统一补上
         kwargs.setdefault("timeout", (10, 30))
@@ -2708,15 +2788,15 @@ def patch_requests_mirror():
             kwargs["headers"] = {"User-Agent": _HTTP_UA}
         else:
             headers.setdefault("User-Agent", _HTTP_UA)
-        return _rewrite_mirror_url(url)
+        return target
 
-    def _send(func, args, kwargs):
+    def _send(func, args, kwargs, strict_cancel=True):
         """网络抖动/镜像节点偶发 5xx 时自动重试几次，避免下载静默失败。"""
         import requests as rq
         last_err = None
         delay = 0.6
         for attempt in range(3):
-            if _download_cancelled.is_set():
+            if strict_cancel and _download_cancelled.is_set():
                 raise RuntimeError("下载已取消")
             try:
                 r = func(*args, **kwargs)
@@ -2737,13 +2817,17 @@ def patch_requests_mirror():
         raise RuntimeError("服务器返回错误")
 
     def _patched_get(url, *args, **kwargs):
-        r = _send(_orig_requests_get, (_prep(url, kwargs),) + args, kwargs)
+        strict = _rewrite_mirror_url(url) != url
+        r = _send(_orig_requests_get, (_prep(url, kwargs),) + args, kwargs,
+                  strict_cancel=strict)
         if kwargs.get("stream"):
             _track_stream(r)
         return r
 
     def _patched_session_get(self, url, *args, **kwargs):
-        r = _send(_orig_session_get, (self, _prep(url, kwargs)) + args, kwargs)
+        strict = _rewrite_mirror_url(url) != url
+        r = _send(_orig_session_get, (self, _prep(url, kwargs)) + args, kwargs,
+                  strict_cancel=strict)
         if kwargs.get("stream"):
             _track_stream(r)
         return r
@@ -3560,6 +3644,35 @@ def _fmt_traffic(n):
     return "%.0f B" % n
 
 
+def _traffic_value(data, *keys):
+    """从接口返回里读取流量值（统一换算成字节）。
+
+    恒星新接口用的是 PascalCase（Traffic / UsedTraffic），旧接口是
+    snake_case，这里都兼容；数值之外也支持 "12.3 GB" 这类文本。
+    """
+    if not isinstance(data, dict):
+        return 0.0
+    for k in keys:
+        if k not in data:
+            continue
+        v = data.get(k)
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            pass
+        m = re.match(r"^\s*([\d.]+)\s*([KMGTP]?)i?B?\s*$", str(v), re.I)
+        if m:
+            mul = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3,
+                   "T": 1024 ** 4, "P": 1024 ** 5}[m.group(2).upper()]
+            try:
+                return float(m.group(1)) * mul
+            except ValueError:
+                pass
+    return 0.0
+
+
 def _stellar_frpc_exe():
     """返回已安装的 StellarFrpc 可执行文件路径；未安装返回空串。"""
     name = "StellarFrpc.exe" if sys.platform == "win32" else "StellarFrpc"
@@ -3641,15 +3754,22 @@ def _ui_call(fn, *args):
 
 
 def _pump_ui():
-    while True:
+    # 单次最多处理 200 条、最多占用 8ms，避免下载时队列刷屏把 Tk 事件循环
+    # 卡死（界面无响应会被用户当成“程序卡死/退出”）。
+    deadline = time.time() + 0.008
+    handled = 0
+    while handled < 200:
         try:
             fn, args = _UI_QUEUE.get_nowait()
         except queue.Empty:
             break
+        handled += 1
         try:
             fn(*args)
         except Exception:
-            traceback.print_exc()
+            _log_exc("界面回调异常")
+        if time.time() > deadline:
+            break
     try:
         if _UI_ROOT is not None:
             _UI_ROOT.after(15, _pump_ui)
@@ -4394,8 +4514,9 @@ class DownloadWorker(QThread):
                         raise RuntimeError("用户取消下载")
                 def set_progress(v):
                     _check()
-                    total = max(1, sum(1 for t in self.tasks if not t.get("_removed")))
-                    done = sum(1 for t in self.tasks
+                    snapshot = list(self.tasks)  # 下载中允许追加任务，先快照避免并发修改
+                    total = max(1, sum(1 for t in snapshot if not t.get("_removed")))
+                    done = sum(1 for t in snapshot
                                if not t.get("_removed")
                                and t["status"] in ("已完成", "已取消", "失败"))
                     ratio = v / max(self._cur_max, 1)
@@ -4444,12 +4565,14 @@ class DownloadWorker(QThread):
         self.step.emit("")
         self.status.emit(_t("已取消") if self._cancel else _t("全部完成"))
     def _install_fabric_api(self, fa, mc_dir, name, cancelled):
-        """把选定的 Fabric API 模组下载到该版本自己的 mods 文件夹。"""
+        """把选定的 Fabric API 模组下载到游戏目录的 mods 文件夹。"""
         url, fname = fa.get("url"), fa.get("filename")
         if not url or not fname:
             return
         self.step.emit(_t("正在下载 Fabric API ..."))
-        mods = version_mods_dir(mc_dir, name)
+        # 普通版本游戏目录就是 <mc>，Fabric 只扫描 <gameDir>/mods；
+        # 之前放到 versions/<版本>/mods 里，游戏根本不会加载。
+        mods = os.path.join(mc_dir, "mods")
         os.makedirs(mods, exist_ok=True)
         dst = os.path.join(mods, fname)
         tmp = dst + ".part"
@@ -4476,11 +4599,17 @@ class DownloadWorker(QThread):
         import minecraft_launcher_lib
         if not hasattr(minecraft_launcher_lib, "mod_loader"):
             raise RuntimeError("minecraft-launcher-lib 版本过低（需 8.0+），请先升级")
-        jp, _ = resolve_java(version, load_config().get("java_path", ""))
-        jp = jp or shutil.which("java")
+        # 安装加载器需要本机 Java：新版 minecraft-launcher-lib 统一用
+        # java -jar installer.jar 安装 Fabric/Forge/NeoForge/Quilt。
+        jp = ""
+        try:
+            jp = resolve_java(version, load_config().get("java_path", ""))[0] or ""
+        except Exception:
+            jp = ""
+        jp = jp or shutil.which("java") or ""
         if not jp:
             raise RuntimeError(_t(
-                "未检测到 Java，Forge/NeoForge 安装器需要 Java，请在设置中指定 Java 路径"))
+                "未检测到 Java，安装模组加载器需要 Java，请在设置中指定 Java 路径"))
         installed = minecraft_launcher_lib.mod_loader.get_mod_loader(ln).install(
             version, mc_dir, java=jp, callback=callback or {})
         installed = str(installed)
@@ -5099,9 +5228,9 @@ class StellarTunnelsThread(QThread):
                 self.failed.emit(data.get("msg") or _t("获取隧道列表失败"))
                 return
             raw = data.get("tunnel") or {}
-            # API 返回的 tunnel 是以隧道名（或 ID）为键的字典，
-            # StellarFrpc 的 -t 参数正是拿这个键去 tunnelData 里取配置，
-            # 所以必须原样保留键名，不能只留下 Id 字段。
+            # API 返回的 tunnel 是以隧道 ID/名称为键的字典。
+            # 官方控制台生成的启动命令是 StellarFrpc -u <token> -t <tunnel.Id>，
+            # 所以连接时优先使用 Id 字段，键名仅作为兜底。
             tunnels = []
             for key, t in raw.items():
                 if isinstance(t, dict):
@@ -5484,7 +5613,8 @@ class ScrollFrame(tk.Frame):
         super().__init__(parent, bg=_resolve(bg))
         self._bg_role = bg
         style(self, bg=bg)
-        self.canvas = tk.Canvas(self, bg=_resolve(bg), highlightthickness=0, bd=0)
+        self.canvas = tk.Canvas(self, bg=_resolve(bg), highlightthickness=0, bd=0,
+                                yscrollincrement=12)
         self.vbar = _mk_scrollbar(self, self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vbar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -5515,8 +5645,13 @@ class ScrollFrame(tk.Frame):
         self.canvas.itemconfigure(self._win, width=e.width)
 
     def _wheel(self, e):
-        delta = -1 if getattr(e, "delta", 0) > 0 else 1
-        self.canvas.yview_scroll(delta, "units")
+        # 按滚动量换算成固定像素（yscrollincrement=12），滚轮/触控板都更平顺，
+        # 不再一跳就是视口的十分之一。
+        d = getattr(e, "delta", 0)
+        if not d:
+            return
+        steps = int(d / 120) if abs(d) >= 120 else (1 if d < 0 else -1)
+        self.canvas.yview_scroll(-steps * 3, "units")
 
     def _on_theme(self):
         self.configure(bg=_resolve(self._bg_role))
@@ -6152,45 +6287,98 @@ class Page(tk.Frame):
     def _on_theme(self):
         self.configure(bg=_resolve(self._bg_role))
 
-# ============ 通用对话框 ============
-class BaseDialog(tk.Toplevel):
+# ============ 通用浮层窗口（应用内，不再弹出独立窗口） ============
+OVERLAY_BG = "#d9d9d9"  # 浮层显示时四周的淡灰色遮罩
+
+
+class BaseDialog(tk.Frame):
+    """应用内浮层窗口：覆盖在主界面最上层，四周为淡灰色遮罩。"""
+
+    _active = None
+
     def __init__(self, parent, title, width=430, height=None):
-        super().__init__(parent)
-        self.withdraw()
-        self.title(title)
-        self.configure(bg=C("bg"))
-        self.transient(parent)
-        self.resizable(False, False)
+        root = _UI_ROOT or parent.winfo_toplevel()
+        super().__init__(root, bg=OVERLAY_BG)
         self.result = None
-        self._body = tk.Frame(self, bg=C("bg"))
-        self._body.pack(fill="both", expand=True, padx=18, pady=14)
+        self._parent = parent
+        self._title = title
         self._width = width
         self._height = height
-        self._parent = parent
+        self._initial_focus = None
+        self._modal_var = None
+        self._closed = False
+
+        # 四周遮罩：淡灰色
+        tk.Frame(self, bg=OVERLAY_BG).place(x=0, y=0, relwidth=1, relheight=1)
+
+        # 居中的“窗口”面板
+        self._card = tk.Frame(self, bg=C("bg"), highlightthickness=1,
+                              highlightbackground=C("border2"),
+                              highlightcolor=C("border2"))
+        self._card.place(relx=0.5, rely=0.5, anchor="center", width=width)
+        head = tk.Frame(self._card, bg=C("bg"))
+        head.pack(fill="x", padx=18, pady=(14, 0))
+        tk.Label(head, text=title, bg=C("bg"), fg=C("text"), font=F(14, True),
+                 anchor="w").pack(side="left", fill="x", expand=True)
+        close = tk.Label(head, text="×", bg=C("bg"), fg=C("muted"),
+                         font=F(14, True), cursor="hand2", padx=4)
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda e: self.destroy())
+        close.bind("<Enter>", lambda e: close.configure(fg=C("red1")))
+        close.bind("<Leave>", lambda e: close.configure(fg=C("muted")))
+        tk.Frame(self._card, bg=C("border"), height=1).pack(fill="x", padx=18,
+                                                            pady=(10, 0))
+        self._body = tk.Frame(self._card, bg=C("bg"))
+        self._body.pack(fill="both", expand=True, padx=18, pady=(12, 14))
 
     def show(self):
-        self._center()
-        self.deiconify()
+        if self._closed or not self.winfo_exists():
+            return self.result
+        BaseDialog._active = self
+        self._modal_var = tk.BooleanVar(master=self, value=False)
+        self.place(x=0, y=0, relwidth=1, relheight=1)
+        self.lift()
+        self.update_idletasks()
+        try:
+            h = max(self._height or 0, self._card.winfo_reqheight())
+            self._card.place_configure(relx=0.5, rely=0.5, anchor="center",
+                                       width=self._width, height=h)
+        except tk.TclError:
+            pass
         try:
             self.grab_set()
-            self.focus_force()
-        except Exception:
+        except tk.TclError:
             pass
-        self.wait_window()
+        target = self._initial_focus or self._body
+        try:
+            target.focus_set()
+        except tk.TclError:
+            pass
+        try:
+            self.wait_variable(self._modal_var)
+        except tk.TclError:
+            pass
+        if BaseDialog._active is self:
+            BaseDialog._active = None
         return self.result
 
-    def _center(self):
-        self.update_idletasks()
-        w = self._width or self.winfo_reqwidth()
-        h = self._height or self.winfo_reqheight()
+    def destroy(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        var = self._modal_var
         try:
-            px, py = self._parent.winfo_rootx(), self._parent.winfo_rooty()
-            pw, ph = self._parent.winfo_width(), self._parent.winfo_height()
-            x = px + (pw - w) // 2
-            y = py + (ph - h) // 3
-        except Exception:
-            x = y = 100
-        self.geometry("%dx%d+%d+%d" % (w, h, max(0, x), max(0, y)))
+            self.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            super().destroy()
+        finally:
+            if var is not None:
+                try:
+                    var.set(True)
+                except tk.TclError:
+                    pass
 
     def button_row(self, buttons):
         row = tk.Frame(self._body, bg=C("bg"))
@@ -6218,7 +6406,7 @@ class BaseDialog(tk.Toplevel):
 def _simple_message(parent, title, msg, fg="text"):
     d = BaseDialog(parent, title, width=430)
     d.add_label(msg, fg=fg, size=13)
-    d.button_row([("确定", lambda: (setattr(d, "result", True), d.destroy()), True)])
+    d.button_row([(_t("确定"), lambda: (setattr(d, "result", True), d.destroy()), True)])
     return d.show()
 
 
@@ -6244,6 +6432,7 @@ def ask_text(parent, title, prompt, initial=""):
     var = tk.StringVar(value=initial)
     ewrap, ent = rounded_entry(d._body, textvariable=var, font_size=13)
     ewrap.pack(fill="x", pady=(0, 8))
+    d._initial_focus = ent
     ent.focus_set()
     try:
         ent.selection_range(0, "end")
@@ -6317,6 +6506,8 @@ class TextInputDialog(BaseDialog):
         ewrap, ent = rounded_entry(self._body, textvariable=var, font_size=13,
                                    show="*" if password else "")
         ewrap.pack(fill="x")
+        if self._initial_focus is None:
+            self._initial_focus = ent
         self.vars[key] = var
         self.widgets[key] = ent
         return ent
@@ -7566,7 +7757,7 @@ class LaunchPage(Page):
             try:
                 self.app.on_game_exited()
             except Exception:
-                traceback.print_exc()
+                _log_exc("游戏结束回调异常")
 
     def _reset_btn(self):
         self.launch_btn.setText(_t("启动游戏"))
@@ -8219,30 +8410,108 @@ _MR_LOADER_NAMES = {
     "optifine": "OptiFine", "iris": "Iris", "canvas": "Canvas",
 }
 
+# ---------- 共用连接池与接口缓存 ----------
+# 搜索、详情、图标都复用同一个 Session：省掉每次请求重新做 DNS / TLS 握手，
+# 这是“点一下要等一会儿”的主要来源之一。
+_HTTP_SESSION = None
+_HTTP_SESSION_LOCK = threading.Lock()
+
+
+def _http_session():
+    global _HTTP_SESSION
+    if _HTTP_SESSION is not None:
+        return _HTTP_SESSION
+    with _HTTP_SESSION_LOCK:
+        if _HTTP_SESSION is None:
+            import requests
+            from requests.adapters import HTTPAdapter
+            s = requests.Session()
+            try:
+                adapter = HTTPAdapter(pool_connections=16, pool_maxsize=24,
+                                      max_retries=1)
+                s.mount("https://", adapter)
+                s.mount("http://", adapter)
+            except Exception:
+                pass
+            s.headers.update({"User-Agent": _MR_HEADERS["User-Agent"]})
+            _HTTP_SESSION = s
+    return _HTTP_SESSION
+
+
+# 接口结果短时缓存：列表↔详情来回切换、重复搜索同一关键词时直接命中，
+# 不再等网络（PCL 的浏览页也是这种“先给缓存、后台再刷新”的思路）。
+_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+_CACHE_MAX = 240
+
+
+def _cache_get(key):
+    with _CACHE_LOCK:
+        item = _CACHE.get(key)
+        if not item:
+            return None
+        expire, value = item
+        if expire < time.time():
+            _CACHE.pop(key, None)
+            return None
+        return value
+
+
+def _cache_put(key, value, ttl=300):
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _CACHE_MAX:
+            now = time.time()
+            for k in [k for k, (exp, _v) in _CACHE.items() if exp < now]:
+                _CACHE.pop(k, None)
+            while len(_CACHE) >= _CACHE_MAX:
+                _CACHE.pop(next(iter(_CACHE)), None)
+        _CACHE[key] = (time.time() + ttl, value)
+
+
+def _cached_fetch(key, ttl, fn):
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit
+    value = fn()
+    _cache_put(key, value, ttl)
+    return value
+
 
 def _mr_request(method, path, params=None, payload=None, timeout=25):
-    import requests
-    r = requests.request(method, _MODRINTH_API + path, params=params,
-                         json=payload, headers=_MR_HEADERS, timeout=timeout)
+    sess = _http_session()
+    url = _MODRINTH_API + path
+    if method.upper() == "GET":
+        r = sess.get(url, params=params, headers=_MR_HEADERS, timeout=timeout)
+    else:
+        r = sess.request(method, url, params=params, json=payload,
+                         headers=_MR_HEADERS, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
 
 def _mr_search(project_type, query, offset=0, limit=20, loader=None):
-    facets = [["project_type:%s" % project_type]]
-    if loader:
-        facets.append(["categories:%s" % loader])
-    return _mr_request("GET", "/search", {
-        "query": query or "", "offset": int(offset), "limit": int(limit),
-        "facets": json.dumps(facets), "index": "relevance"})
+    def _fetch():
+        facets = [["project_type:%s" % project_type]]
+        if loader:
+            facets.append(["categories:%s" % loader])
+        return _mr_request("GET", "/search", {
+            "query": query or "", "offset": int(offset), "limit": int(limit),
+            "facets": json.dumps(facets), "index": "relevance"},
+            timeout=18)
+    key = ("mr_search", project_type, query or "", int(offset), int(limit),
+           loader or "")
+    return _cached_fetch(key, 300, _fetch)
 
 
 def _mr_project(pid):
-    return _mr_request("GET", "/project/" + str(pid))
+    return _cached_fetch(("mr_project", str(pid)), 600,
+                         lambda: _mr_request("GET", "/project/" + str(pid)))
 
 
 def _mr_versions(pid):
-    return _mr_request("GET", "/project/%s/version" % pid)
+    return _cached_fetch(
+        ("mr_versions", str(pid)), 180,
+        lambda: _mr_request("GET", "/project/%s/version" % pid))
 
 
 def _mr_projects(ids):
@@ -8277,6 +8546,8 @@ _CF_GAME_ID = 432
 _CF_CLASS_IDS = {"mod": 6, "shader": 6552, "modpack": 4471}
 _CF_LOADER_NAMES = {"forge": "Forge", "fabric": "Fabric", "quilt": "Quilt",
                     "neoforge": "NeoForge", "liteloader": "LiteLoader"}
+# 记住上一次成功的免 Key 通道，后续请求直接命中，不再每个请求都先试失败的源
+_CF_WORKING = None
 
 
 def _cf_key():
@@ -8287,24 +8558,32 @@ def _cf_key():
 
 
 def _cf_request(path, params=None, timeout=25):
-    import requests
+    sess = _http_session()
     key = _cf_key()
     if key:
         # 填了 Key 只走官方接口
-        r = requests.get(_CF_API + path, params=params,
-                         headers={"x-api-key": key,
-                                  "User-Agent": "LCL-Launcher/1.0.1"},
-                         timeout=timeout)
+        r = sess.get(_CF_API + path, params=params,
+                     headers={"x-api-key": key,
+                              "User-Agent": "LCL-Launcher/1.0.1"},
+                     timeout=timeout)
         r.raise_for_status()
         return r.json()
     # 未填 Key：依次尝试免 Key 公共通道，任一可用即返回
+    global _CF_WORKING
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    last_err = None
+    bases = []
+    if _CF_WORKING:
+        bases.append(_CF_WORKING)
     for base in (_CF_PROXY, _CF_PROXY2):
+        if base not in bases:
+            bases.append(base)
+    last_err = None
+    for base in bases:
         try:
-            r = requests.get(base + path, params=params, headers=headers,
-                             timeout=12)
+            r = sess.get(base + path, params=params, headers=headers,
+                         timeout=12)
             r.raise_for_status()
+            _CF_WORKING = base
             return r.json()
         except Exception as e:
             last_err = e
@@ -8333,95 +8612,146 @@ def _cf_hit(m):
 
 
 def _cf_search(project_type, query, offset=0, limit=20):
-    data = _cf_request("/mods/search", {
-        "gameId": _CF_GAME_ID,
-        "classId": _CF_CLASS_IDS.get(project_type, 6),
-        "searchFilter": query or "", "pageSize": int(limit),
-        "index": int(offset), "sortField": 2, "sortOrder": "desc"})
-    hits = [_cf_hit(m) for m in data.get("data") or []]
-    total = int((data.get("pagination") or {}).get("totalCount") or len(hits))
-    return {"hits": hits, "total_hits": total}
+    def _fetch():
+        data = _cf_request("/mods/search", {
+            "gameId": _CF_GAME_ID,
+            "classId": _CF_CLASS_IDS.get(project_type, 6),
+            "searchFilter": query or "", "pageSize": int(limit),
+            "index": int(offset), "sortField": 2, "sortOrder": "desc"})
+        hits = [_cf_hit(m) for m in data.get("data") or []]
+        total = int((data.get("pagination") or {}).get("totalCount")
+                    or len(hits))
+        return {"hits": hits, "total_hits": total}
+    key = ("cf_search", project_type, query or "", int(offset), int(limit))
+    return _cached_fetch(key, 300, _fetch)
 
 
 def _cf_project(mod_id):
-    m = (_cf_request("/mods/%s" % mod_id).get("data")) or {}
-    authors = [a.get("name") for a in (m.get("authors") or []) if a.get("name")]
-    return {"id": str(m.get("id") or ""),
-            "title": m.get("name") or "?",
-            "slug": m.get("slug") or "",
-            "loaders": _cf_mod_loaders(m),
-            "description": m.get("summary") or "",
-            "downloads": m.get("downloadCount"),
-            "icon_url": (m.get("logo") or {}).get("thumbnailUrl") or "",
-            "project_type": "mod",
-            "authors": authors,
-            "cf_page": (m.get("links") or {}).get("websiteUrl") or ""}
+    def _fetch():
+        m = (_cf_request("/mods/%s" % mod_id).get("data")) or {}
+        authors = [a.get("name") for a in (m.get("authors") or [])
+                   if a.get("name")]
+        return {"id": str(m.get("id") or ""),
+                "title": m.get("name") or "?",
+                "slug": m.get("slug") or "",
+                "loaders": _cf_mod_loaders(m),
+                "description": m.get("summary") or "",
+                "downloads": m.get("downloadCount"),
+                "icon_url": (m.get("logo") or {}).get("thumbnailUrl") or "",
+                "project_type": "mod",
+                "authors": authors,
+                "cf_page": (m.get("links") or {}).get("websiteUrl") or ""}
+    return _cached_fetch(("cf_project", str(mod_id)), 600, _fetch)
 
 
 def _cf_versions(mod_id, limit=300):
-    files, index = [], 0
-    while len(files) < limit:
+    def _fetch():
         data = _cf_request("/mods/%s/files" % mod_id,
-                           {"pageSize": 50, "index": index})
-        batch = data.get("data") or []
-        files.extend(batch)
-        if len(batch) < 50:
-            break
-        index += 50
-    vers = []
-    for f in files:
-        gvs, loaders = [], []
-        for g in f.get("gameVersions") or []:
-            gl = str(g).lower()
-            if gl in _CF_LOADER_NAMES:
-                if gl not in loaders:
-                    loaders.append(gl)
-            elif re.match(r"^\d", str(g)) and str(g) not in gvs:
-                gvs.append(str(g))
-        deps = []
-        for d in f.get("dependencies") or []:
-            if d.get("modId"):
-                deps.append({
-                    "project_id": str(d["modId"]),
-                    "dependency_type": ("required"
-                                        if d.get("relationType") == 1
-                                        else "optional")})
-        vers.append({
-            "id": str(f.get("id") or ""),
-            "version_number": (f.get("displayName") or f.get("fileName")
-                               or "?"),
-            "name": f.get("displayName") or "",
-            "game_versions": gvs,
-            "loaders": loaders,
-            "date_published": f.get("fileDate") or "",
-            "files": [{"primary": True,
-                       "url": f.get("downloadUrl") or "",
-                       "filename": f.get("fileName") or "mod.jar",
-                       "size": f.get("fileLength") or 0}],
-            "dependencies": deps,
-            "_cf_mod_id": str(mod_id),
-            "_cf_file_id": str(f.get("id") or ""),
-        })
-    return vers
+                           {"pageSize": 50, "index": 0})
+        files = list(data.get("data") or [])
+        try:
+            total = int((data.get("pagination") or {}).get("totalCount") or 0)
+        except Exception:
+            total = 0
+        if total > len(files):
+            # 知道总数就并行走剩下的页，避免一页一页串行等（最多 6 页 ≈ 300 条）
+            want = min(int(limit), total)
+            offsets = list(range(50, want, 50))
+            if offsets:
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _page(idx):
+                    try:
+                        d = _cf_request("/mods/%s/files" % mod_id,
+                                        {"pageSize": 50, "index": idx})
+                        return idx, list(d.get("data") or [])
+                    except Exception:
+                        return idx, []
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    pages = list(ex.map(_page, offsets))
+                for _idx, batch in sorted(pages):
+                    files.extend(batch)
+        elif not total:
+            # 代理没返回分页信息时退回逐页拉取（旧行为）
+            index = 50
+            while len(files) < limit:
+                try:
+                    d = _cf_request("/mods/%s/files" % mod_id,
+                                    {"pageSize": 50, "index": index})
+                except Exception:
+                    break
+                batch = list(d.get("data") or [])
+                files.extend(batch)
+                if len(batch) < 50:
+                    break
+                index += 50
+        del files[int(limit):]
+        vers = []
+        for f in files:
+            gvs, loaders = [], []
+            for g in f.get("gameVersions") or []:
+                gl = str(g).lower()
+                if gl in _CF_LOADER_NAMES:
+                    if gl not in loaders:
+                        loaders.append(gl)
+                elif re.match(r"^\d", str(g)) and str(g) not in gvs:
+                    gvs.append(str(g))
+            deps = []
+            for d in f.get("dependencies") or []:
+                if d.get("modId"):
+                    deps.append({
+                        "project_id": str(d["modId"]),
+                        "dependency_type": ("required"
+                                            if d.get("relationType") == 1
+                                            else "optional")})
+            vers.append({
+                "id": str(f.get("id") or ""),
+                "version_number": (f.get("displayName") or f.get("fileName")
+                                   or "?"),
+                "name": f.get("displayName") or "",
+                "game_versions": gvs,
+                "loaders": loaders,
+                "date_published": f.get("fileDate") or "",
+                "files": [{"primary": True,
+                           "url": f.get("downloadUrl") or "",
+                           "filename": f.get("fileName") or "mod.jar",
+                           "size": f.get("fileLength") or 0}],
+                "dependencies": deps,
+                "_cf_mod_id": str(mod_id),
+                "_cf_file_id": str(f.get("id") or ""),
+            })
+        return vers
+    return _cached_fetch(("cf_versions", str(mod_id), int(limit)), 180, _fetch)
 
 
 def _cf_projects(ids):
-    """批量取依赖项目的标题（逐个请求，数量限制在 30 个以内）。"""
-    out = []
+    """批量取依赖项目的标题（并发请求，数量限制在 30 个以内）。"""
     seen = []
     for x in ids:
         s = str(x)
         if s.isdigit() and s not in seen:
             seen.append(s)
-    for s in seen[:30]:
+    seen = seen[:30]
+    if not seen:
+        return []
+
+    def _one(s):
         try:
             m = (_cf_request("/mods/%s" % s).get("data")) or {}
             if m:
-                out.append({"id": str(m.get("id") or s),
-                            "title": m.get("name") or s,
-                            "slug": m.get("slug") or ""})
+                return {"id": str(m.get("id") or s),
+                        "title": m.get("name") or s,
+                        "slug": m.get("slug") or ""}
         except Exception:
-            continue
+            pass
+        return None
+
+    from concurrent.futures import ThreadPoolExecutor
+    out = []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for pr in ex.map(_one, seen):
+            if pr:
+                out.append(pr)
     return out
 
 
@@ -8552,9 +8882,23 @@ def instance_shader_dir(mc_dir, version):
                         "shaderpacks")
 
 
+_INSTANCES_CACHE = {"key": None, "time": 0.0, "value": []}
+
+
 def list_local_instances(mc_dir):
+    # 每次点版本都要重建下载位置列表：本地实例的 JSON 解析结果缓存几秒，
+    # 避免反复扫描 versions 目录造成点击后短暂无响应。
+    try:
+        vr = os.path.join(mc_dir, "versions")
+        key = (mc_dir, os.path.getmtime(vr))
+    except Exception:
+        vr = os.path.join(mc_dir, "versions")
+        key = (mc_dir, 0)
+    now = time.time()
+    cache = _INSTANCES_CACHE
+    if cache["key"] == key and now - cache["time"] < 10:
+        return list(cache["value"])
     out = []
-    vr = os.path.join(mc_dir, "versions")
     try:
         names = sorted(os.listdir(vr))
     except Exception:
@@ -8567,7 +8911,8 @@ def list_local_instances(mc_dir):
             continue
         out.append({"name": n, "mcver": mcver, "loader": loader,
                     "loader_version": lver})
-    return out
+    _INSTANCES_CACHE.update(key=key, time=now, value=out)
+    return list(out)
 
 
 def _loader_matches(instance_loader, version_loaders):
@@ -8603,10 +8948,9 @@ def _sha1_file(path):
 
 
 def _download_to(url, dest, on_progress=None):
-    import requests
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = dest + ".part"
-    r = requests.get(url, stream=True, headers=_MR_HEADERS, timeout=60)
+    r = _http_session().get(url, stream=True, headers=_MR_HEADERS, timeout=60)
     r.raise_for_status()
     try:
         total = int(r.headers.get("Content-Length") or 0)
@@ -8636,10 +8980,74 @@ def _download_to(url, dest, on_progress=None):
 
 
 # ---------- 图标异步加载 ----------
+# 图标原来是一条线程串行下载：20 个卡片要排队等 20 次网络。
+# 现在改成小并发池 + 内存/磁盘两级缓存 + PhotoImage 复用，
+# 第二次进入列表（甚至重启启动器）都能瞬间出图。
 _ICON_CACHE = {}
-_ICON_QUEUE = []
 _ICON_LOCK = threading.Lock()
-_ICON_RUNNING = False
+_ICON_INFLIGHT = {}
+_ICON_PHOTO_CACHE = {}
+_ICON_POOL = None
+_ICON_DIR = os.path.join(DATA_DIR, "cache", "icons")
+_ICON_DISK_MAX = 600
+_ICON_PRUNE_AT = 0.0
+
+
+def _icon_disk_path(url):
+    import hashlib
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest() + ".img"
+    return os.path.join(_ICON_DIR, name)
+
+
+def _icon_read_disk(url):
+    try:
+        with open(_icon_disk_path(url), "rb") as f:
+            return f.read() or None
+    except Exception:
+        return None
+
+
+def _icon_write_disk(url, data):
+    try:
+        os.makedirs(_ICON_DIR, exist_ok=True)
+        path = _icon_disk_path(url)
+        tmp = path + ".part"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _icon_prune_disk():
+    """图标缓存超过上限时删掉最旧的一批，避免目录无限膨胀。"""
+    global _ICON_PRUNE_AT
+    now = time.time()
+    if now - _ICON_PRUNE_AT < 30:
+        return
+    _ICON_PRUNE_AT = now
+    try:
+        names = [n for n in os.listdir(_ICON_DIR) if n.endswith(".img")]
+        if len(names) <= _ICON_DISK_MAX:
+            return
+        files = sorted(((os.path.getmtime(os.path.join(_ICON_DIR, n)), n)
+                        for n in names))
+        for _t, n in files[:len(files) - _ICON_DISK_MAX]:
+            try:
+                os.remove(os.path.join(_ICON_DIR, n))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _icon_pool():
+    global _ICON_POOL
+    if _ICON_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _ICON_POOL = ThreadPoolExecutor(max_workers=6,
+                                        thread_name_prefix="lcl-icon")
+    return _ICON_POOL
 
 
 def _icon_placeholder(canvas, letter, size):
@@ -8654,51 +9062,80 @@ def _icon_placeholder(canvas, letter, size):
 def load_icon_async(url, canvas, letter="?"):
     if not url:
         return
-    if url in _ICON_CACHE:
-        _paint_icon(canvas, _ICON_CACHE[url])
+    data = _ICON_CACHE.get(url)
+    if data is None:
+        data = _icon_read_disk(url)
+        if data is not None:
+            _ICON_CACHE[url] = data
+    if data is not None:
+        _paint_icon(canvas, data, url)
         return
-    global _ICON_RUNNING
     with _ICON_LOCK:
-        _ICON_QUEUE.append((url, canvas))
-        if _ICON_RUNNING:
+        waiters = _ICON_INFLIGHT.get(url)
+        if waiters is not None:
+            waiters.append(canvas)
             return
-        _ICON_RUNNING = True
-    threading.Thread(target=_icon_worker, daemon=True).start()
-
-
-def _icon_worker():
-    global _ICON_RUNNING
-    import requests
-    while True:
+        _ICON_INFLIGHT[url] = [canvas]
+    try:
+        _icon_pool().submit(_icon_fetch, url)
+    except Exception:
         with _ICON_LOCK:
-            if not _ICON_QUEUE:
-                _ICON_RUNNING = False
-                return
-            url, canvas = _ICON_QUEUE.pop(0)
-        try:
-            data = _ICON_CACHE.get(url)
-            if data is None:
-                r = requests.get(url, headers=_MR_HEADERS, timeout=15)
-                r.raise_for_status()
-                data = r.content
-                _ICON_CACHE[url] = data
-            _ui_call(_paint_icon, canvas, data)
-        except Exception:
-            pass
+            _ICON_INFLIGHT.pop(url, None)
 
 
-def _paint_icon(canvas, data):
+def _icon_display_bytes(data):
+    """Tk 只能显示 PNG/GIF；WebP、JPEG 等格式用 Pillow 转成 PNG。"""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" or data[:4] == b"GIF8":
+        return data
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            if im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGBA")
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _icon_fetch(url):
+    data = None
+    try:
+        r = _http_session().get(url, headers=_MR_HEADERS, timeout=12)
+        r.raise_for_status()
+        data = _icon_display_bytes(r.content)
+    except Exception:
+        data = None
+    if data:
+        _ICON_CACHE[url] = data
+        _icon_write_disk(url, data)
+        _icon_prune_disk()
+    with _ICON_LOCK:
+        canvases = _ICON_INFLIGHT.pop(url, [])
+    if data:
+        for c in canvases:
+            _ui_call(_paint_icon, c, data, url)
+
+
+def _paint_icon(canvas, data, url=None):
     try:
         if not canvas.winfo_exists():
             return
         tw = int(canvas.cget("width"))
         th = int(canvas.cget("height"))
-        img = tk.PhotoImage(data=data)
-        limit = max(8, min(tw, th))
-        scale = int(round(max(img.width(), img.height()) / limit))
-        k = max(1, scale)
-        if k > 1:
-            img = img.subsample(k, k)
+        key = (url, tw, th)
+        img = _ICON_PHOTO_CACHE.get(key) if url else None
+        if img is None:
+            img = tk.PhotoImage(data=data)
+            limit = max(8, min(tw, th))
+            scale = int(round(max(img.width(), img.height()) / limit))
+            k = max(1, scale)
+            if k > 1:
+                img = img.subsample(k, k)
+            if url:
+                _ICON_PHOTO_CACHE[key] = img
         canvas.delete("all")
         canvas.create_image(tw / 2, th / 2, image=img)
         canvas._icon_photo = img
@@ -8754,6 +9191,9 @@ class StoreView(tk.Frame):
         self._gv = ""
         self._gv_btns = {}
         self._matches = []
+        self._card_count = 0
+        self._render_token = 0
+        self._ver_token = 0
         self._build_ui()
 
     # ---------- 浏览列表 ----------
@@ -8834,16 +9274,24 @@ class StoreView(tk.Frame):
         if not append:
             self._offset = 0
             self._hits = []
+            # 立即清掉旧卡片：把“清空”和“重建”拆开，结果回来时就不会
+            # 因为一次性销毁几十个控件而整体卡一下
+            self._render_token = getattr(self, "_render_token", 0) + 1
+            self._card_count = 0
+            try:
+                self.scroll.clear()
+            except Exception:
+                pass
         self._loading = True
         self.more_btn.setEnabled(False)
         self.status.configure(text=_t("正在获取列表 ..."), fg=C("muted"))
         ptype, off, q = self.project_type, self._offset, self._query
         src = self.source
 
-        def _ok(data, _src=src):
+        def _ok(data, _src=src, _append=append):
             if _src != self.source:
                 return  # 来源已切换，丢弃过期结果
-            self._on_search_ok(data)
+            self._on_search_ok(data, _append)
 
         def _err(err, _src=src):
             if _src != self.source:
@@ -8857,7 +9305,7 @@ class StoreView(tk.Frame):
             _run_bg(lambda: _mr_search(ptype, q, offset=off, limit=20),
                     _ok, _err)
 
-    def _on_search_ok(self, data):
+    def _on_search_ok(self, data, append=False):
         self._loading = False
         self._loaded = True
         hits = data.get("hits") or []
@@ -8867,7 +9315,7 @@ class StoreView(tk.Frame):
         self.status.configure(text="%s：%d / %d" % (_t("找到"), len(self._hits), total),
                               fg=C("muted"))
         self.more_btn.setEnabled(bool(hits) and self._offset < total)
-        self._render_hits()
+        self._render_hits(append)
 
     def _on_search_err(self, err):
         self._loading = False
@@ -8878,11 +9326,33 @@ class StoreView(tk.Frame):
         self.status.configure(text=_t("获取失败：") + msg, fg=C("red1"))
         self.more_btn.setEnabled(True)
 
-    def _render_hits(self):
-        self.scroll.clear()
-        for idx, hit in enumerate(self._hits):
-            card = self._make_card(hit)
-            card.grid(row=idx // 3, column=idx % 3, padx=5, pady=5, sticky="nsew")
+    def _render_hits(self, append=False):
+        if not append:
+            try:
+                self.scroll.clear()
+            except Exception:
+                pass
+            self._card_count = 0
+        self._render_token = getattr(self, "_render_token", 0) + 1
+        # 分批绘制：先出前几张卡片，剩下的交给事件循环慢慢补，
+        # 加载更多时不再把已有卡片全部重建一遍（PCL 的列表也是渐进出图）。
+        self._render_cards(min(self._card_count, len(self._hits)),
+                           self._render_token)
+
+    def _render_cards(self, start, token):
+        if token != self._render_token:
+            return
+        end = min(start + 6, len(self._hits))
+        for idx in range(start, end):
+            card = self._make_card(self._hits[idx])
+            card.grid(row=idx // 3, column=idx % 3, padx=5, pady=5,
+                      sticky="nsew")
+        self._card_count = end
+        if end < len(self._hits):
+            try:
+                self.after(1, lambda: self._render_cards(end, token))
+            except Exception:
+                pass
 
     def _make_card(self, hit):
         title = hit.get("title") or hit.get("slug") or "?"
@@ -8931,6 +9401,7 @@ class StoreView(tk.Frame):
                                      fg=C("muted"))
         for w in self.detail_body.winfo_children():
             w.destroy()
+        self._detail_token = getattr(self, "_detail_token", 0) + 1
         src = self.source
 
         def _ok(data, _pid=pid, _src=src):
@@ -8946,9 +9417,14 @@ class StoreView(tk.Frame):
         _run_bg(lambda: self._fetch_project(pid), _ok, _err)
 
     def _fetch_project(self, pid):
+        # 项目信息、版本列表、作者（Modrinth）互不依赖，并行请求，
+        # 打开详情页的等待时间从“几段相加”变成“取最慢的一段”。
+        from concurrent.futures import ThreadPoolExecutor
         if self.source == "curseforge":
-            p = _cf_project(pid)
-            vers = _cf_versions(pid)
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fp = ex.submit(_cf_project, pid)
+                fv = ex.submit(_cf_versions, pid)
+                p, vers = fp.result(), fv.result()
             dep_ids = set()
             for v in vers:
                 for d in v.get("dependencies") or []:
@@ -8961,8 +9437,11 @@ class StoreView(tk.Frame):
             except Exception:
                 pass
             return p, vers, deps, p.get("authors") or []
-        p = _mr_project(pid)
-        vers = _mr_versions(pid)
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            fp = ex.submit(_mr_project, pid)
+            fv = ex.submit(_mr_versions, pid)
+            fm = ex.submit(_mr_members, pid)
+            p, vers, members = fp.result(), fv.result(), fm.result()
         dep_ids = set()
         for v in vers:
             for d in v.get("dependencies") or []:
@@ -8974,7 +9453,6 @@ class StoreView(tk.Frame):
                 deps[pr["id"]] = pr
         except Exception:
             pass
-        members = _mr_members(pid)
         return p, vers, deps, members
 
     def _build_detail(self):
@@ -9069,17 +9547,8 @@ class StoreView(tk.Frame):
             anchor="w", pady=(14, 4))
         chips = tk.Frame(body, bg=C("bg"))
         chips.pack(fill="x")
+        self.gv_chips = chips
         self._gv_btns = {}
-        row = col = 0
-        for gv in self._game_versions:
-            b = FlatButton(chips, gv, lambda g=gv: self.select_game_version(g),
-                           bg="card", fg="text", hover="border", padx=8,
-                           pady=3, font_size=10)
-            b.grid(row=row, column=col, padx=3, pady=3)
-            self._gv_btns[gv] = b
-            col += 1
-            if col >= 10:
-                col, row = 0, row + 1
         self.ver_title = tk.Label(body, text="", bg=C("bg"), fg=C("text"),
                                   font=F(13, True), anchor="w")
         self.ver_title.pack(fill="x", pady=(14, 4))
@@ -9087,7 +9556,31 @@ class StoreView(tk.Frame):
         self.ver_box.pack(fill="x")
         self.target_box = tk.Frame(body, bg=C("bg"))
         self.target_box.pack(fill="x", pady=(12, 0))
-        if self._game_versions:
+        # 游戏版本芯片可能有上百个，分批创建，避免详情页瞬间卡住
+        self._detail_token = getattr(self, "_detail_token", 0) + 1
+        self._render_gv_chips(0, self._detail_token)
+
+    def _render_gv_chips(self, start, token):
+        if token != getattr(self, "_detail_token", 0):
+            return
+        try:
+            end = min(start + 16, len(self._game_versions))
+            for i in range(start, end):
+                gv = self._game_versions[i]
+                b = FlatButton(self.gv_chips, gv,
+                               lambda g=gv: self.select_game_version(g),
+                               bg="card", fg="text", hover="border", padx=8,
+                               pady=3, font_size=10)
+                b.grid(row=i // 10, column=i % 10, padx=3, pady=3)
+                self._gv_btns[gv] = b
+        except Exception:
+            return
+        if end < len(self._game_versions):
+            try:
+                self.after(1, lambda: self._render_gv_chips(end, token))
+            except Exception:
+                pass
+        elif self._game_versions:
             self.select_game_version(self._game_versions[0])
         else:
             self.ver_title.configure(text=_t("暂无可用版本"))
@@ -9103,6 +9596,7 @@ class StoreView(tk.Frame):
                            reverse=True)
         self.ver_title.configure(
             text="%s %s：%d" % (gv, _t("可用版本"), len(self._matches)))
+        self._ver_token = getattr(self, "_ver_token", 0) + 1
         for w in self.ver_box.winfo_children():
             w.destroy()
         for w in self.target_box.winfo_children():
@@ -9111,8 +9605,20 @@ class StoreView(tk.Frame):
             tk.Label(self.ver_box, text=_t("该游戏版本下暂无可用版本。"),
                      bg=C("bg"), fg=C("muted"), font=F(11)).pack(anchor="w")
             return
-        for ver in self._matches:
+        # 版本多时（例如 30+）分批插入，避免点一下芯片界面就顿住
+        self._render_version_rows(0, self._ver_token)
+
+    def _render_version_rows(self, start, token):
+        if token != getattr(self, "_ver_token", 0):
+            return
+        end = min(start + 8, len(self._matches))
+        for ver in self._matches[start:end]:
             self._make_version_row(ver)
+        if end < len(self._matches):
+            try:
+                self.after(1, lambda: self._render_version_rows(end, token))
+            except Exception:
+                pass
 
     def _make_version_row(self, ver):
         row = RoundedCard(self.ver_box, radius=8, padx=10, pady=7,
@@ -12084,6 +12590,23 @@ class MultiplayerPage(Page):
         ti = tun_card.inner
         tk.Label(ti, text=_t("隧道"), bg=C("card"), fg=C("text"),
                  font=F(13, True), anchor="w").pack(fill="x")
+        # ---- FRPC 客户端状态：未安装时提供明确的下载入口 ----
+        frow = tk.Frame(ti, bg=C("card")); frow.pack(fill="x", pady=(8, 0))
+        self.frpc_state_icon = IconCanvas(frow, "dot_o", "muted", 14, bg="card")
+        self.frpc_state_icon.pack(side="left", padx=(0, 8))
+        self.frpc_state = tk.Label(frow, text=_t("正在检查客户端 ..."),
+                                   bg=C("card"), fg=C("muted"), font=F(11),
+                                   anchor="w")
+        self.frpc_state.pack(side="left", fill="x", expand=True)
+        self.frpc_dl_btn = FlatButton(frow, _t("下载客户端"),
+                                      self._stellar_download_frpc, bg="bg",
+                                      fg="accent", hover="border",
+                                      padx=14, pady=5, font_size=11)
+        self.frpc_dl_btn.pack(side="right")
+        self.frpc_bar = ProgressBar(ti, height=16, bg="bg", fill="accent",
+                                    bg_role="card", text=True)
+        self.frpc_bar.pack(fill="x", pady=(8, 0))
+        self.frpc_bar.pack_forget()
         srow = tk.Frame(ti, bg=C("card")); srow.pack(fill="x", pady=(8, 0))
         self.tunnel_combo = DropDown(srow, [_t("尚未获取隧道")], width=340,
                                      bg="bg")
@@ -12103,11 +12626,6 @@ class MultiplayerPage(Page):
                                          fg="red1", hover="border",
                                          padx=14, pady=6, font_size=12)
         self.disconnect_btn.pack(side="left", padx=8)
-        self.frpc_bar = ProgressBar(crow, height=16, bg="bg", fill="accent",
-                                    bg_role="card", text=True)
-        self.frpc_bar.configure(width=220)
-        self.frpc_bar.pack(side="left", padx=8)
-        self.frpc_bar.pack_forget()
 
         # ---- 状态行与日志 ----
         self.stellar_status = tk.Label(w, text="", bg=C("bg"), fg=C("text2"),
@@ -12122,6 +12640,7 @@ class MultiplayerPage(Page):
         c = load_config()
         token = c.get("stellar_token", "") or ""
         acc = c.get("stellar_account", "") or ""
+        self._stellar_refresh_frpc()
         if token:
             self.stellar_guest.pack_forget()
             self.stellar_profile.pack(fill="x")
@@ -12208,23 +12727,31 @@ class MultiplayerPage(Page):
         self._refresh_one_done()
 
     def _stellar_info(self, info):
-        name = info.get("username") or info.get("name") or info.get("account") or ""
+        name = (info.get("Username") or info.get("username")
+                or info.get("name") or info.get("account") or "")
         if name:
             self.stellar_name.configure(text=name)
-        used = info.get("used_traffic") or info.get("usedTraffic") or 0
-        total = info.get("total_traffic") or info.get("traffic") or 0
-        try:
-            used_f, total_f = float(used or 0), float(total or 0)
-        except Exception:
-            used_f = total_f = 0.0
-        if total_f > 0:
+        # 新接口字段为 PascalCase：Traffic=总流量，UsedTraffic=已用流量（单位字节）
+        used = _traffic_value(info, "UsedTraffic", "used_traffic", "usedTraffic")
+        total = _traffic_value(info, "Traffic", "total_traffic", "totalTraffic",
+                               "TotalTraffic")
+        _log_write("恒星流量信息：used=%s total=%s raw_used=%r raw_total=%r"
+                   % (used, total, info.get("UsedTraffic"), info.get("Traffic")))
+        if total > 0:
+            pct = min(100.0, used * 100.0 / total)
+            remain = max(0.0, total - used)
             self.traffic_bar.setRange(0, 100)
-            self.traffic_bar.setValue(min(100, used_f * 100.0 / total_f))
+            self.traffic_bar.setValue(pct)
             self.traffic_text.configure(
-                text=_fmt_traffic(used_f) + " / " + _fmt_traffic(total_f))
+                text="%s / %s（%s %s，%.2f%%）" % (
+                    _fmt_traffic(used), _fmt_traffic(total),
+                    _t("剩余"), _fmt_traffic(remain), pct))
         else:
             self.traffic_bar.setValue(0)
-            self.traffic_text.configure(text=_t("流量信息不可用"))
+            self.traffic_text.configure(
+                text="%s（%s：%s）" % (
+                    _fmt_traffic(used), _t("总量"),
+                    _t("流量信息不可用")))
         self.stellar_status.configure(text="")
         self._refresh_one_done()
 
@@ -12255,7 +12782,8 @@ class MultiplayerPage(Page):
         self._tunnels = tunnels
         labels = []
         for t in tunnels:
-            name = t.get("Name") or t.get("name") or t.get("_key") or ""
+            name = (t.get("ProxyName") or t.get("Name") or t.get("name")
+                    or t.get("_key") or "")
             online = _t("在线") if t.get("_online") else _t("离线")
             labels.append("%s  [%s]" % (name, online))
         if not labels:
@@ -12263,6 +12791,71 @@ class MultiplayerPage(Page):
         self.tunnel_combo.set_values(labels, 0)
         self.stellar_log.append(_t("已获取 %d 个隧道。") % len(tunnels))
         self._refresh_one_done()
+
+    def _stellar_refresh_frpc(self):
+        """检查本地 FRPC 客户端，刷新状态文字、指示灯和下载按钮。"""
+        exe = _stellar_frpc_exe()
+        if exe:
+            self._frpc_exe = exe
+            self.frpc_state.configure(
+                text=_t("客户端已就绪：") + os.path.basename(exe), fg=C("text2"))
+            try:
+                self.frpc_state_icon.set_icon("dot", "teal")
+            except Exception:
+                pass
+            self.frpc_dl_btn.setText(_t("重新下载"))
+        else:
+            self._frpc_exe = ""
+            self.frpc_state.configure(
+                text=_t("未检测到客户端，点击「下载客户端」进行下载。"),
+                fg=C("muted"))
+            try:
+                self.frpc_state_icon.set_icon("dot_o", "muted")
+            except Exception:
+                pass
+            self.frpc_dl_btn.setText(_t("下载客户端"))
+
+    def _stellar_download_frpc(self, auto_tid=None):
+        th = getattr(self, "_frpc_dl_thread", None)
+        if th is not None and th.isRunning():
+            return
+        self.frpc_bar.pack(fill="x", pady=(8, 0))
+        self.frpc_bar.setValue(0)
+        self.frpc_state.configure(text=_t("正在下载客户端..."), fg=C("text2"))
+        try:
+            self.frpc_dl_btn.setEnabled(False)
+        except Exception:
+            pass
+        th = StellarDownloadThread()
+        self._frpc_dl_thread = th
+        th.progress.connect(lambda v: self.frpc_bar.setValue(v))
+
+        def on_done(path):
+            self.frpc_bar.pack_forget()
+            try:
+                self.frpc_dl_btn.setEnabled(True)
+            except Exception:
+                pass
+            self._frpc_exe = path
+            self._stellar_refresh_frpc()
+            self.stellar_log.append(_t("客户端已就绪：") + path)
+            if auto_tid is not None:
+                self._start_frpc(path, load_config().get("stellar_token", ""),
+                                 auto_tid)
+
+        def on_fail(msg):
+            self.frpc_bar.pack_forget()
+            try:
+                self.frpc_dl_btn.setEnabled(True)
+            except Exception:
+                pass
+            self._stellar_refresh_frpc()
+            self.stellar_log.append(_t("下载失败：") + msg)
+            alert(self, _t("下载失败"), msg, "error")
+
+        th.done.connect(on_done)
+        th.failed.connect(on_fail)
+        th.start()
 
     def _stellar_connect(self):
         token = load_config().get("stellar_token", "")
@@ -12273,31 +12866,26 @@ class MultiplayerPage(Page):
         if not self._tunnels or idx >= len(self._tunnels):
             alert(self, _t("提示"), _t("请先创建并刷新隧道。"), "warn")
             return
-        tid = self._tunnels[idx].get("_key") or self._tunnels[idx].get("Id")
-        exe = self._frpc_exe
+        t = self._tunnels[idx]
+        # 官方客户端参数：StellarFrpc -u <token> -t <隧道 Id>（不是字典键名）
+        tid = t.get("Id") or t.get("_key")
+        if not tid:
+            alert(self, _t("提示"), _t("隧道数据异常，请刷新重试。"), "warn")
+            return
+        exe = self._frpc_exe or _stellar_frpc_exe()
         if exe and os.path.isfile(exe):
+            self._frpc_exe = exe
             self._start_frpc(exe, token, tid)
             return
-        self.frpc_bar.pack(side="left", padx=8)
-        self.frpc_bar.setValue(0)
-        th = StellarDownloadThread()
-        def on_progress(v):
-            self.frpc_bar.setValue(v)
-        def on_done(path):
-            self._frpc_exe = path
-            self.frpc_bar.pack_forget()
-            self.stellar_log.append(_t("客户端已就绪：") + path)
-            self._start_frpc(path, token, tid)
-        def on_fail(msg):
-            self.frpc_bar.pack_forget()
-            alert(self, _t("下载失败"), msg, "error")
-        th.progress.connect(on_progress)
-        th.done.connect(on_done)
-        th.failed.connect(on_fail)
-        th.start()
+        self.stellar_log.append(_t("未检测到客户端，正在自动下载..."))
+        self._stellar_download_frpc(tid)
 
     def _start_frpc(self, exe, token, tid):
+        if self._frpc is not None and self._frpc.isRunning():
+            self.stellar_log.append(_t("已有隧道正在运行，请先断开连接。"))
+            return
         self.stellar_log.append(_t("正在连接隧道 ..."))
+        self.stellar_status.configure(text=_t("正在连接隧道 ..."))
         proc = StellarFrpcProcess(exe, token, tid)
         self._frpc = proc
         proc.output.connect(lambda s: self.stellar_log.append(s))
@@ -12307,8 +12895,13 @@ class MultiplayerPage(Page):
     def _frpc_finished(self, code, out):
         if code == StellarFrpcProcess.PROBE_FAILED:
             self.stellar_log.append(_t("客户端无法运行：") + str(out))
+            self.stellar_status.configure(text=_t("连接失败"))
+        elif code == 0:
+            self.stellar_log.append(_t("隧道已停止。"))
+            self.stellar_status.configure(text=_t("隧道已停止"))
         else:
             self.stellar_log.append(_t("FRPC 已退出（错误码 %d）") % code)
+            self.stellar_status.configure(text=_t("连接失败"))
 
     def _stellar_disconnect(self):
         if self._frpc and self._frpc.isRunning():
@@ -12318,6 +12911,7 @@ class MultiplayerPage(Page):
                 pass
         self._frpc = None
         self.stellar_log.append(_t("已断开隧道连接。"))
+        self.stellar_status.configure(text=_t("隧道已停止"))
 
     def _stellar_logout(self):
         if not confirm(self, _t("退出登录"), _t("确定退出恒星账号登录吗？")):
@@ -12919,7 +13513,7 @@ class MainWindow(tk.Tk):
             try:
                 page.on_show()
             except Exception:
-                traceback.print_exc()
+                _log_exc("页面加载异常（%s）" % key)
 
     def _animate_slide(self, old, new):
         w = self.content.winfo_width() or 874
@@ -12951,7 +13545,7 @@ class MainWindow(tk.Tk):
             self.configure(bg=C("bg"))
             self.content.configure(bg=C("bg"))
         except Exception:
-            traceback.print_exc()
+            _log_exc("切换主题异常")
 
     def apply_update(self, new_file):
         """更新文件已下载：空闲时立即重启，游戏运行/启动中则等它结束后再重启。"""
@@ -13009,11 +13603,20 @@ class MainWindow(tk.Tk):
 
 
 def main():
+    _log_write("启动 LCL %s" % APP_VERSION)
+    try:
+        patch_requests_mirror()
+    except Exception:
+        _log_exc("启用镜像下载失败")
+    try:
+        patch_java_runtime_source()
+    except Exception:
+        _log_exc("启用 Java 运行时源控制失败")
     try:
         app = MainWindow()
         app.mainloop()
     except Exception:
-        traceback.print_exc()
+        _log_exc("启动器异常退出")
         try:
             messagebox.showerror("Lightning Craft Launcher",
                                  "启动失败：\n" + traceback.format_exc())
