@@ -4419,13 +4419,13 @@ class LaunchThread(QThread):
             # 启动阶段可能正在补全版本文件：中断阻塞中的下载请求，避免取消卡住
             interrupt_active_downloads()
     def request_close(self):
-        """关闭已运行的游戏：只发送正常退出请求，不强制杀进程。"""
+        """关闭已运行的游戏；尚未创建窗口时直接结束进程。"""
         if self.proc and self.proc.poll() is None:
             if graceful_close_process(self.proc.pid):
                 self.log_signal.emit(_t("已请求游戏正常退出，等待游戏保存并关闭窗口 ..."))
             else:
-                self.log_signal.emit(_t(
-                    "未找到游戏窗口，无法发送正常关闭请求，请手动关闭游戏窗口。"))
+                self.log_signal.emit(_t("未找到游戏窗口，将直接结束游戏进程。"))
+                self.cancel()
         else:
             self._cancel_requested = True
             # 启动阶段可能正卡在下载阻塞里：切断网络请求，让线程立刻退出
@@ -7567,8 +7567,6 @@ class LaunchPage(Page):
                       (_t("是"), _yes, True)])
         if not d.show():
             return
-        self._starting_key = None
-        self._reset_btn()
         for k, th in procs:
             entry = self._procs.get(k) or {}
             entry["cancelled"] = True
@@ -7595,13 +7593,19 @@ class LaunchPage(Page):
         self.config = load_config()
         if self._starting_key is not None:
             key = self._starting_key
-            self._starting_key = None
             entry = self._procs.get(key)
-            if entry and entry.get("thread"):
+            th = entry.get("thread") if entry else None
+            if th is not None and th.isRunning():
                 entry["cancelled"] = True
-                self._append_log(_t("已请求取消此次启动 ..."), key)
-                entry["thread"].cancel()
-            self._reset_btn()
+                if entry.get("pid"):
+                    self._append_log(_t("已请求关闭游戏 ..."), key)
+                    th.request_close()
+                else:
+                    self._append_log(_t("已请求取消此次启动 ..."), key)
+                    th.cancel()
+            else:
+                self._starting_key = None
+                self._reset_btn()
             return
         if not self.selected_account:
             alert(self, _t("提示"), _t("请先选择一个账号。"), "warn")
@@ -7743,9 +7747,6 @@ class LaunchPage(Page):
         if title:
             apply_game_window_title(pid, title)
         self._update_proc_item(key)
-        if self._starting_key == key:
-            self._starting_key = None
-            self._reset_btn()
 
     def _set_lang_cn(self, mc, key):
         f = os.path.join(mc, "options.txt")
