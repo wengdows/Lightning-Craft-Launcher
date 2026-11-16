@@ -21,10 +21,26 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller requests minecraft-launcher-lib send2trash pillow
+          pip install "pyinstaller>=6.3,<7" requests minecraft-launcher-lib send2trash pillow
 
       - name: Build EXE
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name LightningCraftLauncher --icon "assets/icon.ico" --add-data "assets/icon.png;assets" "Lightning Craft Launcher.py"
+        run: pyinstaller --noconfirm --clean LightningCraftLauncher.spec
+
+      - name: Verify bundled runtime DLLs
+        shell: pwsh
+        run: |
+          pyi-archive_viewer -l dist/LightningCraftLauncher.exe > contents.txt
+          Write-Host "已打进 EXE 的运行时 DLL："
+          Select-String -Path contents.txt -Pattern "vcruntime|msvcp|concrt|ucrtbase|api-ms-win-crt" |
+            ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
+          $need = @("vcruntime140.dll", "ucrtbase.dll")
+          $missing = @($need | Where-Object {
+            -not (Select-String -Path contents.txt -SimpleMatch $_ -Quiet)
+          })
+          if ($missing.Count -gt 0) {
+            Write-Error ("缺少运行时 DLL：" + ($missing -join ", "))
+            exit 1
+          }
 
       - name: Show output
         run: dir dist
