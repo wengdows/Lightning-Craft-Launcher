@@ -895,6 +895,16 @@ _EN = {
     "游戏下载": "Game download",
     "导入整合包": "Import modpack",
     "选择整合包文件": "Select modpack file",
+    "转到": "Go",
+    "上一级": "Up",
+    "主目录": "Home",
+    "选择此文件夹": "Select this folder",
+    "打开": "Open",
+    "[目录] ": "[Folder] ",
+    "（没有可选择的项目）": "(No selectable items)",
+    "输入的路径不存在。": "The entered path does not exist.",
+    "请选择有效的文件夹。": "Please select a valid folder.",
+    "请选择有效的文件。": "Please select a valid file.",
     "支持的格式：Modrinth (.mrpack) 与 CurseForge (.zip)": "Supported: Modrinth (.mrpack) and CurseForge (.zip)",
     "实例名称": "Instance name",
     "可选文件": "Optional files",
@@ -1083,7 +1093,9 @@ _EN = {
     "请选择进程": "Select process",
     "清除已关闭": "Clear closed",
     "停止全部": "Stop all",
-    "尚未启动游戏": "No game started",
+    "尚未选择进程": "No process selected",
+    "退出游戏": "Exit game",
+    "（已退出）": " (Exited)",
     "清空当前输出区": "Clear current output",
     "关闭已关闭游戏进程的输出区": "Close the output areas of closed game processes",
     "停止全部 Minecraft 进程": "Stop all Minecraft processes",
@@ -5388,7 +5400,7 @@ class StellarFrpcProcess(QThread):
                 pass
 # ============ tkinter 界面基础设施 ============
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, font as tkfont
+from tkinter import ttk, messagebox, font as tkfont
 
 _THEME_WATCH = []
 
@@ -5795,14 +5807,18 @@ class DropDown(tk.Canvas):
             return
         if self._pop is not None:
             return
-        pop = tk.Toplevel(self)
+        root = _UI_ROOT or self.winfo_toplevel()
+        pop = tk.Frame(root, bg=_resolve("border"))
         self._pop = pop
-        pop.overrideredirect(True)
-        pop.configure(bg=_resolve("border"))
-        x = self.winfo_rootx()
-        y = self.winfo_rooty() + self.winfo_height()
+        w = max(self.winfo_width(), 160)
         h = min(260, 30 * len(self._values) + 4)
-        pop.geometry("%dx%d+%d+%d" % (max(self.winfo_width(), 160), h, x, y))
+        x = self.winfo_rootx() - root.winfo_rootx()
+        y = self.winfo_rooty() - root.winfo_rooty() + self.winfo_height()
+        if y + h > root.winfo_height():
+            y = max(0, self.winfo_rooty() - root.winfo_rooty() - h)
+        x = max(0, min(x, max(0, root.winfo_width() - w)))
+        pop.place(x=x, y=y, width=w, height=h)
+        pop.lift()
         lb = tk.Listbox(pop, bg=_resolve("panel"), fg=_resolve("text"),
                         selectbackground=_resolve("accent"), selectforeground="#1e1e2e",
                         font=F(13), bd=0, highlightthickness=0, activestyle="none")
@@ -6527,6 +6543,163 @@ def ask_multi_choice(parent, title, prompt, items, checked=True):
     return d.result
 
 
+class PathPickerDialog(BaseDialog):
+    """应用内文件/目录选择器，与提示框共用淡灰遮罩浮层。"""
+
+    def __init__(self, parent, title, directory=False, filetypes=None, initial=""):
+        super().__init__(parent, title, width=620, height=420)
+        import fnmatch
+        self._fnmatch = fnmatch.fnmatch
+        self._directory = directory
+        self._patterns = []
+        for _label, patterns in filetypes or []:
+            for pattern in str(patterns).split():
+                self._patterns.append("*" if pattern == "*.*" else pattern)
+        initial = os.path.expanduser(str(initial or "").strip())
+        if initial:
+            initial = os.path.abspath(initial)
+        initial_dir = initial if os.path.isdir(initial) else os.path.dirname(initial)
+        self._cwd = initial_dir if initial_dir and os.path.isdir(initial_dir) else PROGRAM_DIR
+        selected = initial if not directory and os.path.isfile(initial) else self._cwd
+        self._items = []
+        self.var_path = tk.StringVar(value=selected)
+
+        top = tk.Frame(self._body, bg=C("bg"))
+        top.pack(fill="x", pady=(0, 8))
+        ewrap, ent = rounded_entry(top, textvariable=self.var_path, font_size=12)
+        ewrap.pack(side="left", fill="x", expand=True)
+        FlatButton(top, _t("转到"), self._go_path, bg="card", fg="accent",
+                   hover="border", padx=12, pady=5, font_size=11).pack(
+                       side="right", padx=(8, 0))
+        ent.bind("<Return>", lambda _e: self._go_path())
+        self._initial_focus = ent
+
+        nav = tk.Frame(self._body, bg=C("bg"))
+        nav.pack(fill="x", pady=(0, 8))
+        FlatButton(nav, _t("上一级"), self._go_up, bg="card", fg="text2",
+                   hover="border", padx=12, pady=4, font_size=11).pack(side="left")
+        FlatButton(nav, _t("主目录"), self._go_home, bg="card", fg="text2",
+                   hover="border", padx=12, pady=4, font_size=11).pack(
+                       side="left", padx=(6, 0))
+
+        listing = tk.Frame(self._body, bg=C("border"))
+        listing.pack(fill="both", expand=True)
+        self.listbox = tk.Listbox(
+            listing, bg=C("panel"), fg=C("text"), selectbackground=C("accent"),
+            selectforeground="#1e1e2e", font=F(12), bd=0, highlightthickness=0,
+            activestyle="none", exportselection=False)
+        scroll = tk.Scrollbar(listing, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        self.listbox.pack(side="left", fill="both", expand=True, padx=(1, 0), pady=1)
+        scroll.pack(side="right", fill="y", padx=(0, 1), pady=1)
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+        self.listbox.bind("<Double-Button-1>", lambda _e: self._open_selected())
+
+        self.status = tk.Label(self._body, text="", bg=C("bg"), fg=C("red1"),
+                               font=F(11), anchor="w")
+        self.status.pack(fill="x", pady=(6, 0))
+        accept_text = _t("选择此文件夹") if directory else _t("打开")
+        self.button_row([(_t("取消"), self.destroy, False),
+                         (accept_text, self._accept, True)])
+        self._refresh()
+
+    def _path_from_entry(self):
+        raw = os.path.expanduser(self.var_path.get().strip())
+        if not raw:
+            return ""
+        if not os.path.isabs(raw):
+            raw = os.path.join(self._cwd, raw)
+        return os.path.abspath(raw)
+
+    def _matches(self, name):
+        return not self._patterns or any(
+            self._fnmatch(name, pattern) for pattern in self._patterns)
+
+    def _refresh(self):
+        self.listbox.delete(0, "end")
+        self._items = []
+        try:
+            entries = list(os.scandir(self._cwd))
+            entries.sort(key=lambda e: (not os.path.isdir(e.path), e.name.lower()))
+            for entry in entries:
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    continue
+                if not is_dir and (self._directory or not self._matches(entry.name)):
+                    continue
+                self._items.append((entry.name, entry.path, is_dir))
+                prefix = _t("[目录] ") if is_dir else "    "
+                self.listbox.insert("end", prefix + entry.name)
+        except OSError as e:
+            self.status.configure(text=str(e))
+        if not self._items:
+            self.listbox.insert("end", _t("（没有可选择的项目）"))
+
+    def _on_select(self, _event=None):
+        sel = self.listbox.curselection()
+        if not sel or sel[0] >= len(self._items):
+            return
+        _name, path, _is_dir = self._items[sel[0]]
+        self.var_path.set(path)
+        self.status.configure(text="")
+
+    def _open_selected(self):
+        sel = self.listbox.curselection()
+        if not sel or sel[0] >= len(self._items):
+            return
+        _name, path, is_dir = self._items[sel[0]]
+        if is_dir:
+            self._cwd = path
+            self.var_path.set(path)
+            self.status.configure(text="")
+            self._refresh()
+        elif not self._directory:
+            self.var_path.set(path)
+            self._accept()
+
+    def _go_path(self):
+        path = self._path_from_entry()
+        if os.path.isdir(path):
+            self._cwd = path
+            self.var_path.set(path)
+            self.status.configure(text="")
+            self._refresh()
+        elif not self._directory and os.path.isfile(path):
+            self._accept()
+        else:
+            self.status.configure(text=_t("输入的路径不存在。"))
+
+    def _go_up(self):
+        parent = os.path.dirname(self._cwd)
+        if parent and parent != self._cwd:
+            self._cwd = parent
+            self.var_path.set(parent)
+            self.status.configure(text="")
+            self._refresh()
+
+    def _go_home(self):
+        self._cwd = os.path.expanduser("~")
+        self.var_path.set(self._cwd)
+        self.status.configure(text="")
+        self._refresh()
+
+    def _accept(self):
+        path = self._path_from_entry()
+        valid = os.path.isdir(path) if self._directory else os.path.isfile(path)
+        if not valid:
+            self.status.configure(text=_t("请选择有效的文件夹。") if self._directory
+                                  else _t("请选择有效的文件。"))
+            return
+        self.result = path
+        self.destroy()
+
+
+def ask_path(parent, title, directory=False, filetypes=None, initial=""):
+    return PathPickerDialog(parent, title, directory=directory,
+                            filetypes=filetypes, initial=initial).show() or ""
+
+
 def merge_thirdparty_accounts(targets, token, api, injector):
     """把 (玩家名, UUID) 列表写入账号文件，返回 (新增, 已存在跳过)。"""
     accs = load_accounts().setdefault("accounts", [])
@@ -6899,7 +7072,7 @@ class LaunchPage(Page):
         prow = tk.Frame(right, bg=C("bg")); prow.pack(fill="x", pady=(2, 0))
         tk.Label(prow, text=_t("请选择进程"), bg=C("bg"), fg=C("muted"),
                  font=F(11)).pack(side="left")
-        self.proc_combo = DropDown(prow, [_t("尚未启动游戏")], width=180,
+        self.proc_combo = DropDown(prow, [_t("尚未选择进程")], width=180,
                                    command=self._on_proc_changed, bg="card")
         self.proc_combo.pack(side="left", padx=6)
         FlatButton(prow, _t("清除已关闭"), self.clear_closed_procs, bg="card",
@@ -6924,7 +7097,7 @@ class LaunchPage(Page):
         FlatButton(self.log_actions, _t("打开日志"), self._open_active_log,
                    bg="card", fg="accent", hover="border", padx=14, pady=6,
                    font_size=12).pack(side="right")
-        self._create_log_page("main", _t("尚未启动游戏"), None)
+        self._create_log_page("main", _t("尚未选择进程"), None)
         self._active_key = "main"
 
     def _make_listbox(self, parent):
@@ -7361,9 +7534,11 @@ class LaunchPage(Page):
 
     # ---------- 日志 ----------
     @staticmethod
-    def _proc_label(version, pid=None):
+    def _proc_label(version, pid=None, closed=False):
         if version is None:
-            return _t("尚未启动游戏")
+            return _t("尚未选择进程")
+        if closed:
+            return "%s%s" % (version, _t("（已退出）"))
         if pid:
             return "%s  (PID %s)" % (version, pid)
         return "%s%s" % (version, _t("（启动中）"))
@@ -7420,6 +7595,7 @@ class LaunchPage(Page):
         keys = list(self._procs.keys())
         if key in keys:
             self.proc_combo.set_current_index(keys.index(key))
+        self._refresh_launch_btn()
         self._refresh_log_actions()
 
     def _sync_proc_combo(self):
@@ -7428,9 +7604,11 @@ class LaunchPage(Page):
         labels = []
         for k in keys:
             e = self._procs[k]
-            labels.append(self._proc_label(e.get("version"), e.get("pid")))
+            labels.append(self._proc_label(e.get("version"), e.get("pid"),
+                                           e.get("closed")))
         idx = keys.index(self._active_key) if self._active_key in keys else 0
         self.proc_combo.set_values(labels, idx)
+        self._refresh_launch_btn()
 
     def _on_proc_changed(self, idx):
         keys = getattr(self, "_proc_keys", [])
@@ -7591,21 +7769,18 @@ class LaunchPage(Page):
     # ---------- 启动 ----------
     def toggle_launch(self):
         self.config = load_config()
-        if self._starting_key is not None:
-            key = self._starting_key
-            entry = self._procs.get(key)
-            th = entry.get("thread") if entry else None
-            if th is not None and th.isRunning():
-                entry["cancelled"] = True
-                if entry.get("pid"):
-                    self._append_log(_t("已请求关闭游戏 ..."), key)
-                    th.request_close()
-                else:
-                    self._append_log(_t("已请求取消此次启动 ..."), key)
-                    th.cancel()
+        key = self._active_key
+        entry = self._procs.get(key)
+        th = entry.get("thread") if entry else None
+        if key != "main" and th is not None and th.isRunning():
+            entry["cancelled"] = True
+            if entry.get("pid"):
+                self._append_log(_t("已请求关闭游戏 ..."), key)
+                th.request_close()
             else:
-                self._starting_key = None
-                self._reset_btn()
+                self._append_log(_t("已请求取消此次启动 ..."), key)
+                th.cancel()
+            self._refresh_launch_btn()
             return
         if not self.selected_account:
             alert(self, _t("提示"), _t("请先选择一个账号。"), "warn")
@@ -7784,10 +7959,10 @@ class LaunchPage(Page):
 
     def _on_proc_exit(self, key, code):
         entry = self._procs.get(key)
+        if self._starting_key == key:
+            self._starting_key = None
         if entry is None:
-            if self._starting_key == key:
-                self._starting_key = None
-                self._reset_btn()
+            self._refresh_launch_btn()
             return
         entry["closed"] = True
         entry["code"] = code
@@ -7795,11 +7970,9 @@ class LaunchPage(Page):
         # 用户主动关闭（取消启动 / 停止全部）不算异常，不弹出分析入口
         entry["abnormal"] = (code not in (0, None)
                              and not entry.get("cancelled"))
-        if self._starting_key == key:
-            self._starting_key = None
-            self._reset_btn()
         if entry.get("removed"):
             self._procs.pop(key, None)
+            self._refresh_launch_btn()
             return
         pid = entry.get("pid")
         if pid:
@@ -7828,6 +8001,24 @@ class LaunchPage(Page):
         self.launch_btn.setColors(("#e74c3c", "#f38ba8"),
                                   ("#f06050", "#f5a0b8"),
                                   ("#c0392b", "#c0392b"), "#ffffff")
+
+    def _set_running_btn(self):
+        self.launch_btn.setText(_t("退出游戏"))
+        self.launch_btn.setColors(("#e74c3c", "#f38ba8"),
+                                  ("#f06050", "#f5a0b8"),
+                                  ("#c0392b", "#c0392b"), "#ffffff")
+
+    def _refresh_launch_btn(self):
+        """启动/退出按钮只跟随输出区当前选中的进程。"""
+        entry = self._procs.get(self._active_key) or {}
+        th = entry.get("thread")
+        if self._active_key != "main" and th is not None and th.isRunning():
+            if entry.get("pid"):
+                self._set_running_btn()
+            else:
+                self._set_starting_btn()
+        else:
+            self._reset_btn()
 
     def is_game_running(self):
         return bool(self._running_threads())
@@ -9795,8 +9986,7 @@ class StoreView(tk.Frame):
         self.dl_status.pack(fill="x", pady=(6, 0))
 
     def _browse_target(self, ver):
-        path = filedialog.askdirectory(parent=self,
-                                       title=_t("选择下载到的文件夹"))
+        path = ask_path(self, _t("选择下载到的文件夹"), directory=True)
         if path:
             self.start_download(ver, path)
 
@@ -11038,8 +11228,8 @@ class DownloadPage(Page):
                 text=_t("已下载整合包，请确认信息后点击“开始导入”。"))
 
     def _pick_pack(self):
-        path = filedialog.askopenfilename(
-            parent=self, title=_t("选择整合包文件"),
+        path = ask_path(
+            self, _t("选择整合包文件"),
             filetypes=[(_t("整合包"), "*.mrpack *.zip"),
                        ("Modrinth", "*.mrpack"), ("CurseForge", "*.zip"),
                        (_t("所有文件"), "*.*")])
@@ -11997,7 +12187,8 @@ class SettingsPage(Page):
                    font_size=11).pack(side="left", padx=(6, 0))
 
     def _pick_dir(self, var):
-        path = filedialog.askdirectory(parent=self, title=_t("选择游戏目录"))
+        path = ask_path(self, _t("选择游戏目录"), directory=True,
+                        initial=var.get())
         if path:
             var.set(path)
 
@@ -13437,8 +13628,8 @@ class JavaMissingDialog(BaseDialog):
             th.start()
 
         def manual():
-            path = filedialog.askopenfilename(
-                parent=self, title=_t("选择 Java 可执行文件"),
+            path = ask_path(
+                self, _t("选择 Java 可执行文件"),
                 filetypes=[("Java", "java.exe javaw java"),
                            (_t("所有文件"), "*.*")])
             if path:
