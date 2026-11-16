@@ -167,8 +167,11 @@ def _dep_window_tk(missing_mods, missing_pips):
     result = {"ok": False, "done": False, "closed": False}
     log_queue = queue.Queue()
     root = tk.Tk()
+    root.withdraw()  # 图标和尺寸就绪前不显示，避免闪过默认羽毛图标
     root.title(_t("依赖缺失")); root.geometry("520x420")
     root.resizable(False, False); root.configure(bg="#2b2b3a")
+    _apply_window_icon(root)
+    root.deiconify()
     try:
         root.eval("tk::PlaceWindow . center")
     except Exception:
@@ -13330,6 +13333,28 @@ def _resource_path(*parts):
     return os.path.join(base, *parts)
 
 
+def _apply_window_icon(window):
+    """所有窗口统一使用应用图标，避免出现 Tk 羽毛 / Python 默认图标。"""
+    try:
+        ico = _resource_path("assets", "icon.ico")
+        if sys.platform == "win32" and os.path.isfile(ico):
+            window.iconbitmap(ico)
+    except Exception:
+        pass
+    try:
+        png = _resource_path("assets", "icon.png")
+        if os.path.isfile(png):
+            photo = tk.PhotoImage(file=png)
+        else:
+            # 资源缺失时也不回退到默认图标，改用纯色图标
+            photo = tk.PhotoImage(width=16, height=16)
+            photo.put("#2b2b3a", to=(0, 0, 16, 16))
+        window._app_icon_photo = photo  # 持有引用，防止被垃圾回收
+        window.iconphoto(True, photo)  # True：之后创建的子窗口同样生效
+    except Exception:
+        pass
+
+
 _UPDATE_HELPER = r'''
 import os, sys, time, shutil, subprocess
 
@@ -13669,6 +13694,7 @@ class MainWindow(tk.Tk):
         global _UI_ROOT
         super().__init__()
         _UI_ROOT = self
+        self.withdraw()  # 图标和尺寸就绪前不显示，避免默认图标闪现
         cfg = load_config()
         set_theme_name(cfg.get("theme", "deep_blue"))
         self.config_data = cfg
@@ -13678,6 +13704,7 @@ class MainWindow(tk.Tk):
         self.maxsize(1000, 660)
         self.configure(bg=C("bg"))
         self._apply_app_icon()
+        self.deiconify()
         self._anim = bool(cfg.get("enable_animations", True))
         self._key = ""
 
@@ -13726,19 +13753,7 @@ class MainWindow(tk.Tk):
         self.after(15, _pump_ui)
 
     def _apply_app_icon(self):
-        ico = _resource_path("assets", "icon.ico")
-        png = _resource_path("assets", "icon.png")
-        try:
-            if sys.platform == "win32" and os.path.isfile(ico):
-                self.iconbitmap(ico)
-        except Exception:
-            pass
-        try:
-            if os.path.isfile(png):
-                self._icon_photo = tk.PhotoImage(file=png)
-                self.iconphoto(True, self._icon_photo)
-        except Exception:
-            pass
+        _apply_window_icon(self)
 
     def switch_page(self, key, animate=True):
         if key == self._key or key not in self.pages:
@@ -13864,8 +13879,13 @@ def main():
     except Exception:
         _log_exc("启动器异常退出")
         try:
+            err_root = tk.Tk()
+            err_root.withdraw()
+            _apply_window_icon(err_root)
             messagebox.showerror("Lightning Craft Launcher",
-                                 "启动失败：\n" + traceback.format_exc())
+                                 "启动失败：\n" + traceback.format_exc(),
+                                 parent=err_root)
+            err_root.destroy()
         except Exception:
             pass
 
