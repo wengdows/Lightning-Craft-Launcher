@@ -587,6 +587,8 @@ _LOADER_CACHE_TTL = 1800  # 30 分钟
 
 # ============ 下载源（镜像重写） ============
 _DOWNLOAD_SOURCE = "mirror"  # "official" | "mirror"
+# 游戏文件并发下载线程数（库文件 / 资源文件同时下载）
+_DL_WORKERS = 16
 # 原版游戏资源走 BMCLAPI 镜像时需要重写的官方域名
 # 注意：BMCLAPI 的 libraries 与 assets 路径分别带 /maven、/assets 前缀，
 # Fabric/Quilt 的 meta 路径带 /fabric-meta、/quilt-meta 前缀，必须按实测规则拼接。
@@ -700,6 +702,7 @@ _EN = {
     "等待中": "Waiting",
     "等待下载": "Waiting",
     "下载中": "Downloading",
+    "准备下载": "Preparing download",
     "任务列表：": "Tasks:",
     "暂无下载任务": "No download tasks",
     "没有正在进行的下载。": "No download in progress.",
@@ -2728,6 +2731,7 @@ def _dl_step_text(t):
                   ("native", "下载原生库"), ("java", "下载 Java 运行时"),
                   ("fabric", "安装 Fabric 加载器"), ("neoforge", "安装 NeoForge 加载器"),
                   ("forge", "安装 Forge 加载器"), ("quilt", "安装 Quilt 加载器"),
+                  ("complete", "安装完成"),
                   ("extract", "解压文件")):
         if k in low:
             return zh
@@ -2927,12 +2931,48 @@ def patch_java_runtime_source():
         prev = _JAVA_SOURCE_OVERRIDE
         try:
             _JAVA_SOURCE_OVERRIDE = "official"
-            return orig(jvm_version, minecraft_directory, callback, max_workers)
+            return orig(jvm_version, minecraft_directory, callback,
+                        max_workers or _DL_WORKERS)
         finally:
             _JAVA_SOURCE_OVERRIDE = prev
 
     _wrapped._lcl_source_patched = True
     mll_install.install_jvm_runtime = _wrapped
+
+
+def patch_threaded_downloads():
+    """显式启用多线程下载库文件 / 资源文件。
+
+    minecraft-launcher-lib 用 ThreadPoolExecutor 下载，但默认线程数随机器波动，
+    这里统一指定并发线程数，保证下载速度稳定。
+    """
+    try:
+        import inspect
+        import minecraft_launcher_lib.install as mll_install
+    except Exception:
+        return
+    for name in ("install_libraries", "install_assets"):
+        orig = getattr(mll_install, name, None)
+        if orig is None or getattr(orig, "_lcl_threaded", False):
+            continue
+        try:
+            params = list(inspect.signature(orig).parameters)
+        except (TypeError, ValueError):
+            continue
+        # 旧版 mll 没有 max_workers 参数，不强行注入
+        if "max_workers" not in params:
+            continue
+        arg_pos = params.index("max_workers")
+
+        def _wrap(func, arg_pos):
+            def _wrapped(*args, **kwargs):
+                if len(args) <= arg_pos and not kwargs.get("max_workers"):
+                    kwargs["max_workers"] = _DL_WORKERS
+                return func(*args, **kwargs)
+            _wrapped._lcl_threaded = True
+            return _wrapped
+
+        setattr(mll_install, name, _wrap(orig, arg_pos))
 
 
 def _neoforge_versions():
@@ -4520,12 +4560,12 @@ class DownloadWorker(QThread):
     取消后清理下载到一半的版本文件夹。"""
     status = pyqtSignal(str); progress = pyqtSignal(int); step = pyqtSignal(str)
     finished_one = pyqtSignal(int, bool, str); task_started = pyqtSignal(int, str)
+    task_progress = pyqtSignal(int, int)   # (任务 id, 单任务进度 0-100)
     def __init__(self, tasks):
         super().__init__()
         self.tasks = tasks              # 共享引用：GUI 线程可运行中追加
         self._cancel = False
         self._cancel_tids = set()
-        self._cur_max = 1
     def is_cancelled(self): return self._cancel
     def cancel_task(self, tid):
         """取消单个任务；若它正在下载，立即打断阻塞中的网络请求。"""
@@ -4572,29 +4612,79 @@ class DownloadWorker(QThread):
             version, loader, name = task["version"], task.get("loader"), task["name"]
             task["_pre_dirs"] = {d for d in self._version_dirs(mc_dir, task)
                                  if os.path.isdir(d)}
-            self._cur_max = 1
             self.task_started.emit(tid, name)
             self.status.emit(f"{_t('正在下载')} {name} ...")
             def _cancelled(tid=tid):
                 return self._cancel or tid in self._cancel_tids
             def make_cb(_cancelled=_cancelled):
+                # 单任务内部的进度状态：mll 按「索引 → 库 → 资源 → 其它」分阶段
+                # 回调，每个阶段都从 0 重新计数，这里按阶段权重合成并保证只增不减，
+                # 进度条才不会来回跳。
+                state = {"lo": 0.0, "hi": 0.06, "max": 1, "count": 0,
+                         "ratio": 0.0, "status": _t("准备下载"), "last": 0.0}
+
                 def _check():
                     if _cancelled():
                         raise RuntimeError("用户取消下载")
-                def set_progress(v):
-                    _check()
+
+                def _span(text):
+                    low = str(text or "").lower()
+                    if "librar" in low:
+                        return 0.06, 0.60
+                    if "asset" in low:
+                        return 0.60, 0.94
+                    if "java" in low:
+                        return 0.94, 0.99
+                    return 0.0, 0.06
+
+                def _report(force=False):
+                    # 资源文件动辄上千个，逐文件刷新会把界面队列刷爆，做节流
+                    now = time.time()
+                    if not force and now - state["last"] < 0.1:
+                        return
+                    state["last"] = now
                     snapshot = list(self.tasks)  # 下载中允许追加任务，先快照避免并发修改
                     total = max(1, sum(1 for t in snapshot if not t.get("_removed")))
                     done = sum(1 for t in snapshot
                                if not t.get("_removed")
                                and t["status"] in ("已完成", "已取消", "失败"))
-                    ratio = v / max(self._cur_max, 1)
-                    pct = int(((done + ratio) / total) * 100)
+                    pct = int(((done + state["ratio"]) / total) * 100)
                     self.progress.emit(min(100, max(0, pct)))
-                def set_max(v): self._cur_max = max(int(v), 1)
+                    self.task_progress.emit(tid, int(state["ratio"] * 100))
+                    text = state["status"]
+                    if state["max"] > 1:
+                        text = "%s  %d/%d" % (text, state["count"], state["max"])
+                    self.step.emit(text)
+
+                def set_max(v):
+                    state["max"] = max(int(v or 0), 1)
+                    state["count"] = 0
+                    _report(True)
+
+                def set_progress(v):
+                    _check()
+                    state["count"] = min(max(int(v or 0), 0), state["max"])
+                    intra = state["count"] / float(max(state["max"], 1))
+                    cur = state["lo"] + (state["hi"] - state["lo"]) * intra
+                    # 多阶段 / 继承版本会重复回调，进度只前进不回退
+                    state["ratio"] = max(state["ratio"], min(cur, 1.0))
+                    _report()
+
                 def set_status(t):
                     _check()
-                    self.step.emit(_dl_step_text(t))
+                    state["status"] = _dl_step_text(t)
+                    lo, hi = _span(t)
+                    if state["ratio"] - lo > 0.02:
+                        # 继承版本（Forge 等）会先装父版本再装子版本，
+                        # 把后续阶段压缩到剩余进度里，保证进度条还能继续前进
+                        lo = state["ratio"]
+                        hi = min(0.99, lo + max(0.02, (0.99 - lo) * 0.5))
+                    state["lo"], state["hi"] = lo, hi
+                    # 阶段切换时清掉上一阶段的文件计数，避免显示旧的总数
+                    state["max"], state["count"] = 1, 0
+                    state["ratio"] = max(state["ratio"], min(lo, 1.0))
+                    _report(True)
+
                 return {"setStatus": set_status,
                         "setMax": set_max, "setProgress": set_progress}
             cb = make_cb()
@@ -10469,6 +10559,7 @@ class DownloadPage(Page):
         self._suppress_dialogs = False
         self._task_seq = 0
         self._run_tids = []
+        self._active_status = {}   # 任务 id -> 任务列表里的状态标签
         self._cancel_ui = False
         self._cancel_poll_job = None
         self._fa_workers = []
@@ -10970,6 +11061,7 @@ class DownloadPage(Page):
     def _refresh_active_list(self):
         """任务列表常驻显示全部任务（等待/下载中/已完成/失败/已取消）。"""
         self.active_scroll.clear()
+        self._active_status = {}
         visible = [t for t in self.tasks if not t.get("_removed")]
         if not visible:
             tk.Label(self.active_scroll.inner, text=_t("暂无下载任务"),
@@ -10988,8 +11080,10 @@ class DownloadPage(Page):
             IconButton(row, "x", "", lambda tid=t["_tid"]: self._remove_task(tid),
                        bg="panel", fg="red2", hover="card", size=22,
                        icon_size=11).pack(side="right", padx=(0, 2))
-            tk.Label(row, text=_t(st), bg=C("panel"), fg=C(color),
-                     font=F(10), width=6, anchor="e").pack(side="right")
+            status_lbl = tk.Label(row, text=_t(st), bg=C("panel"), fg=C(color),
+                                  font=F(10), width=11, anchor="e")
+            status_lbl.pack(side="right")
+            self._active_status[t["_tid"]] = status_lbl
             tk.Label(row, text=t["name"], bg=C("panel"), fg=C("text"),
                      font=F(11), anchor="w").pack(side="left", fill="x",
                                                   expand=True, padx=(6, 2),
@@ -11068,6 +11162,7 @@ class DownloadPage(Page):
         self.worker.status.connect(lambda s: self.status_label.configure(text=s))
         self.worker.step.connect(lambda s: self.step_label.configure(text=s))
         self.worker.progress.connect(lambda v: self.progress.setValue(v))
+        self.worker.task_progress.connect(self._on_task_progress)
         self.worker.task_started.connect(self._on_started)
         self.worker.finished_one.connect(self._on_done)
         self.worker.finished.connect(self._on_all_done)
@@ -11118,6 +11213,16 @@ class DownloadPage(Page):
             t["status"] = "下载中"
         self._set_queue_text(tid, "%s    —    %s" % (name, _t("下载中...")))
         self._refresh_active_list()
+
+    def _on_task_progress(self, tid, pct):
+        """把当前任务的下载百分比实时写进右侧任务列表。"""
+        lbl = self._active_status.get(tid)
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text="%s %d%%" % (_t("下载中"), pct))
+        except Exception:
+            pass
 
     def _on_done(self, tid, ok, msg):
         t = self._task_by_tid(tid)
@@ -13873,6 +13978,10 @@ def main():
         patch_java_runtime_source()
     except Exception:
         _log_exc("启用 Java 运行时源控制失败")
+    try:
+        patch_threaded_downloads()
+    except Exception:
+        _log_exc("启用多线程下载失败")
     try:
         app = MainWindow()
         app.mainloop()
