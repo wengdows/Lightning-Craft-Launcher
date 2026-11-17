@@ -5773,7 +5773,7 @@ class ScrollFrame(tk.Frame):
         self._bg_role = bg
         style(self, bg=bg)
         self.canvas = tk.Canvas(self, bg=_resolve(bg), highlightthickness=0, bd=0,
-                                yscrollincrement=12)
+                                yscrollincrement=12, width=1, height=1)
         self.vbar = _mk_scrollbar(self, self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vbar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -5860,8 +5860,13 @@ class DropDown(tk.Canvas):
             _rounded_rect(self, 0.5, 0.5, w - 0.5, h - 0.5, 8, fill)
             fg = _resolve("muted" if self._disabled else "text")
             txt = str(self._values[self._idx]) if self._values else ""
-            self.create_text(10, h / 2, text=txt, fill=fg, font=F(13),
-                             anchor="w")
+            item = self.create_text(10, h / 2, text=txt, fill=fg, font=F(13),
+                                    anchor="w")
+            # 进程名过长时截断显示，避免文字压到右侧箭头
+            limit = max(20, w - 34)
+            while txt and self.bbox(item) and self.bbox(item)[2] > 10 + limit:
+                txt = txt[:-1]
+                self.itemconfigure(item, text=txt + "…")
             self.create_text(w - 18, h / 2, text="▾",
                              fill=_resolve("muted" if self._disabled
                                            else "text2"), font=F(12))
@@ -6090,8 +6095,17 @@ class AccentButton(tk.Canvas):
                 c1, c2 = _resolve("accent"), _resolve("accent2")
                 fg = "#1e1e2e"
             _gradient_round_rect(self, w, h, c1, c2, 8)
-            self.create_text(w / 2, h / 2, text=self._text, fill=fg,
-                             font=F(self._fs, bold=True))
+            item = self.create_text(w / 2, h / 2, text=self._text, fill=fg,
+                                    font=F(self._fs, bold=True))
+            # 高 DPI 或文字过长时自动缩小字号，避免文字被按钮裁掉
+            size = self._fs
+            while size > 9:
+                bbox = self.bbox(item)
+                if (not bbox or (bbox[2] - bbox[0] <= w - 10
+                                 and bbox[3] - bbox[1] <= h - 6)):
+                    break
+                size -= 1
+                self.itemconfigure(item, font=F(size, bold=True))
         except Exception:
             pass
 
@@ -6248,9 +6262,12 @@ class RoundedCard(tk.Canvas):
     def __init__(self, parent, radius=10, bg="card", border="border",
                  surround=None, borderwidth=1, padx=10, pady=8, cursor=None):
         self._surround_role = surround or _surround_of(parent)
+        # Canvas 默认请求 378x276，会把父容器撑到不合理的尺寸；
+        # 这里先给最小尺寸，实际大小由内容 / 布局管理器决定。
         super().__init__(parent, bg=_resolve(self._surround_role),
                          highlightthickness=0, bd=0,
-                         cursor=cursor or "")
+                         cursor=cursor or "", width=1, height=1)
+        self._req_width = 1
         self._radius, self._bg_role, self._border_role = radius, bg, border
         self._bw = max(1, int(borderwidth))
         self._selected = False
@@ -6261,6 +6278,9 @@ class RoundedCard(tk.Canvas):
         self.inner.bind("<Configure>", self._fit)
         self.bind("<Configure>", lambda e: self._redraw())
         self._on_theme = self._redraw
+        # 初始尺寸为 1x1 时 inner 不会被映射，<Configure> 也不会触发；
+        # 这里在空闲时主动量一次内容尺寸，避免卡片/输入框一直是 1px 高。
+        self.after_idle(self._fit)
         self._redraw()
 
     def _fit(self, _e=None):
@@ -6268,6 +6288,10 @@ class RoundedCard(tk.Canvas):
             h = self.inner.winfo_reqheight() + self._bw * 2
             if h > 2 and abs(h - self.winfo_height()) > 1:
                 self.configure(height=h)
+            w = self.inner.winfo_reqwidth() + self._bw * 2
+            if w > 2 and w != self._req_width:
+                self._req_width = w
+                self.configure(width=w)
         except Exception:
             pass
 
@@ -6296,7 +6320,7 @@ class RoundedCard(tk.Canvas):
 
 
 def rounded_entry(parent, textvariable=None, font_size=13, show="", radius=8,
-                  bg="card"):
+                  bg="card", width=None):
     """圆角输入框：返回 (外壳, Entry)，布局时请 pack/grid 外壳。"""
     card = RoundedCard(parent, radius=radius, bg=bg, border="border",
                        padx=8, pady=4)
@@ -6307,6 +6331,8 @@ def rounded_entry(parent, textvariable=None, font_size=13, show="", radius=8,
                    disabledforeground=C("muted"),
                    readonlybackground=C(bg),
                    show=show or "")
+    if width:
+        ent.configure(width=width)
     style(ent, bg=bg, fg="text", insert_bg="text", select_bg="accent",
           select_fg="#1e1e2e")
     ent.pack(fill="x", expand=True)
@@ -6397,7 +6423,8 @@ class LogText(tk.Text):
     def __init__(self, parent, bg="log_bg", fg="log_fg", height=10):
         super().__init__(parent, bg=_resolve(bg), fg=_resolve(fg), font=F(11, mono=True),
                          bd=0, highlightthickness=1, highlightbackground=_resolve("border"),
-                         relief="flat", wrap="word", state="disabled", padx=8, pady=6)
+                         relief="flat", wrap="word", state="disabled", padx=8, pady=6,
+                         width=1)
         self._bg_role, self._fg_role = bg, fg
         self._on_theme = self._theme
         self.tag_config("info", foreground=_resolve("text2"))
@@ -7159,21 +7186,20 @@ class LaunchPage(Page):
                                      fg=C("muted"), font=F(12), anchor="w")
         self.version_info.pack(fill="x")
         self.launch_btn = AccentButton(right, _t("启动游戏"), self.toggle_launch,
-                                       width=400, height=76, font_size=20)
+                                       width=1, height=76, font_size=20)
         self.launch_btn.pack(fill="x", pady=(10, 8))
 
+        # 进程选择行：下拉框自动占满剩余宽度，右侧两个按钮始终可见
         prow = tk.Frame(right, bg=C("bg")); prow.pack(fill="x", pady=(2, 0))
-        tk.Label(prow, text=_t("请选择进程"), bg=C("bg"), fg=C("muted"),
-                 font=F(11)).pack(side="left")
-        self.proc_combo = DropDown(prow, [_t("尚未选择进程")], width=180,
-                                   command=self._on_proc_changed, bg="card")
-        self.proc_combo.pack(side="left", padx=6)
         FlatButton(prow, _t("清除已关闭"), self.clear_closed_procs, bg="card",
                    fg="text2", hover="border", padx=10, pady=3,
-                   font_size=11).pack(side="right", padx=(4, 0))
+                   font_size=11).pack(side="right", padx=(6, 0))
         FlatButton(prow, _t("清空"), self.clear_current_log, bg="card",
                    fg="text2", hover="border", padx=10, pady=3,
                    font_size=11).pack(side="right")
+        self.proc_combo = DropDown(prow, [_t("尚未选择进程")], width=150,
+                                   command=self._on_proc_changed, bg="card")
+        self.proc_combo.pack(side="left", fill="x", expand=True)
 
         self.log_holder = tk.Frame(right, bg=C("log_bg"))
         self.log_holder.pack(fill="both", expand=True, pady=(6, 0))
@@ -10619,7 +10645,7 @@ class DownloadPage(Page):
                       self.tab_shader, self.tab_shader2]
         self.dl_view.pack(fill="both", expand=True)
         # 任务列表常驻在下载页右侧：切换任意子页都能看到全部下载任务
-        right = tk.Frame(body, bg=C("bg"), width=300)
+        right = tk.Frame(body, bg=C("bg"), width=270)
         right.pack(side="right", fill="y", padx=(12, 0))
         right.pack_propagate(False)
         tk.Label(right, text=_t("任务列表："), bg=C("bg"), fg=C("text2"),
@@ -10682,11 +10708,11 @@ class DownloadPage(Page):
                  font=F(13)).pack(side="left")
         self.type_combo = DropDown(r1, [_t("正式版"), _t("测试版"),
                                         _t("远古版本"), _t("愚人节版")],
-                                   width=130, command=lambda i: self._filter_versions())
+                                   width=100, command=lambda i: self._filter_versions())
         self.type_combo.pack(side="left", padx=(4, 20))
         tk.Label(r1, text=_t("游戏版本："), bg=C("bg"), fg=C("text"),
                  font=F(13)).pack(side="left")
-        self.version_combo = DropDown(r1, [_t("正在获取版本列表...")], width=240,
+        self.version_combo = DropDown(r1, [_t("正在获取版本列表...")], width=1,
                                       command=lambda i: self._on_version_changed())
         self.version_combo.pack(side="left", padx=(4, 0), fill="x", expand=True)
 
@@ -10694,13 +10720,14 @@ class DownloadPage(Page):
         r2 = tk.Frame(w, bg=C("bg")); r2.pack(fill="x", pady=(0, 6))
         tk.Label(r2, text=_t("Mod 加载器："), bg=C("bg"), fg=C("text"),
                  font=F(13)).pack(side="left")
-        self.loader_combo = DropDown(r2, [_t("原版")], width=180,
+        self.loader_combo = DropDown(r2, [_t("原版")], width=140,
                                      command=lambda i: self._on_loader_changed())
         self.loader_combo.pack(side="left", padx=(4, 20))
         tk.Label(r2, text=_t("版本名："), bg=C("bg"), fg=C("text"),
                  font=F(13)).pack(side="left")
         self.name_var = tk.StringVar()
-        ewrap, self.name_edit = rounded_entry(r2, textvariable=self.name_var)
+        ewrap, self.name_edit = rounded_entry(r2, textvariable=self.name_var,
+                                              width=10)
         ewrap.pack(side="left", padx=(4, 0), fill="x", expand=True)
 
         # Fabric API 行
@@ -10709,13 +10736,13 @@ class DownloadPage(Page):
                                   bg="bg", font_size=13)
         self.fabric_cb.pack(side="left")
         self.fabric_api_combo = DropDown(self.fabric_row, [_t("正在获取...")],
-                                         width=200, bg="card")
+                                         width=160, bg="card")
         self.fabric_api_combo.pack(side="left", padx=(8, 8), fill="x", expand=True)
         tk.Label(self.fabric_row, text=_t("许多 Fabric 模组都需要此前置"),
                  bg=C("bg"), fg=C("muted"), font=F(11)).pack(side="left")
         self._set_fabric_visible(False)
 
-        AccentButton(w, _t("加入下载队列"), self._add_task, width=300, height=36,
+        AccentButton(w, _t("加入下载队列"), self._add_task, width=1, height=36,
                      font_size=13).pack(fill="x", pady=(2, 8))
 
         # 中部：队列 + 任务列表
@@ -10728,7 +10755,8 @@ class DownloadPage(Page):
         self.queue_list = tk.Listbox(qwrap, bg=C("panel"), fg=C("text"),
                                      selectbackground=C("card"), selectforeground=C("text"),
                                      font=F(12), bd=0, highlightthickness=0,
-                                     activestyle="none", exportselection=False)
+                                     activestyle="none", exportselection=False,
+                                     height=3)
         qsb = _mk_scrollbar(qwrap, self.queue_list.yview)
         self.queue_list.configure(yscrollcommand=qsb.set)
         qsb.pack(side="right", fill="y")
@@ -10773,7 +10801,7 @@ class DownloadPage(Page):
 
     def _build_import_view(self, parent):
         w = tk.Frame(parent, bg=C("bg"))
-        self.drop_zone = tk.Canvas(w, height=110, bg=C("panel"),
+        self.drop_zone = tk.Canvas(w, height=110, width=1, bg=C("panel"),
                                    highlightthickness=0, bd=0, cursor="hand2")
         self.drop_zone.pack(fill="x", pady=(0, 8))
         self.drop_zone.bind("<Button-1>", lambda e: self._pick_pack())
@@ -10792,7 +10820,7 @@ class DownloadPage(Page):
                                      fg=C("text2"), font=F(12), anchor="w")
         self.imp_file_lbl.pack(side="left", padx=10, fill="x", expand=True)
         self.imp_info = tk.Label(w, text="", bg=C("bg"), fg=C("text"), font=F(12),
-                                 justify="left", anchor="w", wraplength=700)
+                                 justify="left", anchor="w", wraplength=480)
         self.imp_info.pack(fill="x", pady=(0, 6))
         r2 = tk.Frame(w, bg=C("bg")); r2.pack(fill="x", pady=(0, 6))
         tk.Label(r2, text=_t("实例名称："), bg=C("bg"), fg=C("text"),
@@ -12270,7 +12298,8 @@ class SettingsPage(Page):
 
     # ---------- 基础字段 ----------
     def _field(self, parent, label, key, hint=""):
-        row = tk.Frame(parent, bg=C("bg")); row.pack(fill="x", pady=(0, 10))
+        row = tk.Frame(parent, bg=C("bg"))
+        row.pack(fill="x", pady=(0, 2 if hint else 10))
         tk.Label(row, text=label, bg=C("bg"), fg=C("text"), font=F(13),
                  width=18, anchor="w").pack(side="left")
         var = tk.StringVar(value=str(self.config.get(key, "") or ""))
@@ -12278,8 +12307,10 @@ class SettingsPage(Page):
         ewrap.pack(side="left", fill="x", expand=True)
         setattr(self, "var_" + key, var)
         if hint:
-            tk.Label(row, text=hint, bg=C("bg"), fg=C("muted"),
-                     font=F(10)).pack(side="left", padx=6)
+            # 提示文字放到输入框下方，避免窗口较窄时被右侧裁切
+            tk.Label(parent, text=hint, bg=C("bg"), fg=C("muted"),
+                     font=F(10), anchor="w", justify="left",
+                     wraplength=700).pack(anchor="w", pady=(0, 8))
         return var
 
     def _dir_field(self, parent, label, key):
@@ -13804,9 +13835,16 @@ class MainWindow(tk.Tk):
         set_theme_name(cfg.get("theme", "deep_blue"))
         self.config_data = cfg
         self.title(cfg.get("title") or "Lightning Craft Launcher")
-        self.geometry("1000x660")
-        self.minsize(1000, 660)
-        self.maxsize(1000, 660)
+        # 按屏幕大小自适应初始窗口，避免小屏/高缩放时窗口超出屏幕导致按钮被裁掉
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w = max(880, min(1080, sw - 80))
+        h = max(440, min(720, sh - 100))
+        # 屏幕本身比目标尺寸还小时，以屏幕为准，保证窗口底部不会被挤到屏幕外
+        w = min(w, max(760, sw - 20))
+        h = min(h, max(400, sh - 60))
+        self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2),
+                                       max(0, (sh - h) // 2)))
+        self.minsize(min(880, w), min(440, h))
         self.configure(bg=C("bg"))
         self._apply_app_icon()
         self.deiconify()
