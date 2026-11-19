@@ -532,6 +532,21 @@ STELLAR_TUNNELS = "https://console.stellarfrp.top/tunnels"
 STELLAR_FRPC_LIST_URL = "https://resources.stellarfrp.top/api/fs/list?path=StellarCore/HalalCloud/frpc"
 STELLAR_FRPC_DL_BASE = "https://resources.stellarfrp.top/d/StellarCore/HalalCloud/frpc"
 STELLAR_FRPC_DIR = os.path.join(DATA_DIR, "stellarfrpc")
+# 资源站有反爬策略，会间歇性返回网页而不是文件；下载时带浏览器 UA 并重试
+STELLAR_FRPC_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0 Safari/537.36")
+# 列表接口拿不到文件名时的兜底（版本升级后列表接口仍会优先使用）
+STELLAR_FRPC_DEFAULT = {
+    ("windows", "amd64"): "StellarFrpc_0.67.0_windows_amd64_v0.67.0-42-g75e0c22b.zip",
+    ("windows", "386"): "StellarFrpc_0.67.0_windows_386_v0.67.0-42-g75e0c22b.zip",
+    ("windows", "arm64"): "StellarFrpc_0.67.0_windows_arm64_v0.67.0-42-g75e0c22b.zip",
+    ("darwin", "amd64"): "StellarFrpc_0.67.0_darwin_amd64_v0.67.0-42-g75e0c22b.tar.gz",
+    ("darwin", "arm64"): "StellarFrpc_0.67.0_darwin_arm64_v0.67.0-42-g75e0c22b.tar.gz",
+    ("linux", "amd64"): "StellarFrpc_0.67.0_linux_amd64_v0.67.0-42-g75e0c22b.tar.gz",
+    ("linux", "386"): "StellarFrpc_0.67.0_linux_386_v0.67.0-42-g75e0c22b.tar.gz",
+    ("linux", "arm64"): "StellarFrpc_0.67.0_linux_arm64_v0.67.0-42-g75e0c22b.tar.gz",
+}
 
 # ---------- 业务常量 ----------
 # ============ Java 检测（带缓存） ============
@@ -891,6 +906,20 @@ _EN = {
     "获取客户端列表失败": "Failed to get client list",
     "未找到适合当前系统的客户端": "No client for your system",
     "客户端解压失败": "Failed to extract client",
+    "下载被服务器拦截，请稍后重试":
+        "The download was blocked by the server; please retry later",
+    "下载的文件不完整，请稍后重试":
+        "The downloaded file is incomplete; please retry",
+    "客户端文件不完整，可能被杀毒软件拦截":
+        "The client file is incomplete; it may have been blocked by antivirus software",
+    "隧道已连接：": "Tunnel connected: ",
+    "隧道已连接": "Tunnel connected",
+    "好友可连接地址：": "Address for friends: ",
+    "本地 %d 端口未监听：请先在游戏里「对局域网开放」。":
+        "Nothing is listening on local port %d. Open your world to LAN in-game first.",
+    "重新登录成功，正在重连隧道 ...":
+        "Re-login succeeded, reconnecting the tunnel ...",
+    "自动重新登录失败：": "Automatic re-login failed: ",
     "获取隧道列表失败": "Failed to get tunnel list",
     "启动此隧道": "Start this tunnel",
     "用户数据刷新间隔": "User data refresh interval",
@@ -3789,20 +3818,24 @@ def _stellar_frpc_exe():
     return p if os.path.isfile(p) else ""
 
 
+def _stellar_plat_arch():
+    """当前系统的资源站平台/架构标识。"""
+    import platform
+    plat = "windows" if sys.platform == "win32" else (
+        "darwin" if sys.platform == "darwin" else "linux")
+    arch = platform.machine().lower()
+    arch = {"amd64": "amd64", "x86_64": "amd64", "x64": "amd64",
+            "arm64": "arm64", "aarch64": "arm64",
+            "i386": "386", "i686": "386", "x86": "386",
+            "armv7l": "arm32v7", "armv6l": "arm32v6"}.get(arch, arch)
+    return plat, arch
+
+
 def _stellar_pick_frpc_file(names):
     """从 Alist 文件列表中挑出当前系统/架构对应的 StellarFrpc 压缩包文件名。"""
     # 只取 StellarFrpc 客户端（排除 StellarLauncher 等其它文件）
     names = [n for n in names if n.lower().startswith("stellarfrpc")]
-    plat = "windows" if sys.platform == "win32" else (
-        "darwin" if sys.platform == "darwin" else "linux")
-    import platform
-    arch = platform.machine().lower()
-    if arch in ("amd64", "x86_64", "x64"):
-        arch = "amd64"
-    elif arch in ("arm64", "aarch64"):
-        arch = "arm64"
-    elif arch in ("i386", "i686", "x86"):
-        arch = "386"
+    plat, arch = _stellar_plat_arch()
     # 优先精确匹配平台+架构，其次只匹配平台
     exact = [n for n in names if plat in n and arch in n]
     if exact:
@@ -3811,6 +3844,27 @@ def _stellar_pick_frpc_file(names):
     if plat_only:
         return plat_only[0]
     return names[0] if names else ""
+
+
+def _stellar_default_frpc_name():
+    """列表接口不可用时按平台/架构给出兜底文件名。"""
+    return STELLAR_FRPC_DEFAULT.get(_stellar_plat_arch(), "")
+
+
+def _port_open(host, port, timeout=0.4):
+    """检测本地端口是否有程序监听（用于提醒用户先开放局域网）。"""
+    import socket
+    s = socket.socket()
+    try:
+        s.settimeout(timeout)
+        return s.connect_ex((host, int(port))) == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
 
 
 def _stellar_pick_bin_from_archive(zip_path):
@@ -5329,44 +5383,108 @@ class StellarDownloadThread(QThread):
 
     def run(self):
         try:
-            import requests
-            r = requests.get(STELLAR_FRPC_LIST_URL, timeout=(10, 30))
-            data = r.json()
-            if data.get("code") != 200:
-                self.failed.emit(_t("获取客户端列表失败"))
-                return
-            content = (data.get("data") or {}).get("content") or []
-            names = [c.get("name", "") for c in content if c.get("name")]
-            fname = _stellar_pick_frpc_file(names)
+            fname = self._resolve_name()
             if not fname:
                 self.failed.emit(_t("未找到适合当前系统的客户端"))
                 return
-            url = STELLAR_FRPC_DL_BASE + "/" + fname
             os.makedirs(STELLAR_FRPC_DIR, exist_ok=True)
             tmp = os.path.join(STELLAR_FRPC_DIR, fname)
-            with requests.get(url, stream=True, timeout=(10, 60)) as r:
-                r.raise_for_status()
-                total = int(r.headers.get("Content-Length", 0))
-                got = 0
-                with open(tmp, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        got += len(chunk)
-                        if total:
-                            self.progress.emit(min(100, int(got * 100 / total)))
-            exe = _stellar_pick_bin_from_archive(tmp)
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-            if exe and os.path.isfile(exe):
-                self.done.emit(exe)
-            else:
-                self.failed.emit(_t("客户端解压失败"))
+            last_err = ""
+            # 资源站会间歇性返回反爬网页（HTTP 200 + text/html），
+            # 这里校验文件头并重试，避免一次失败就直接报「下载失败」。
+            for attempt in range(3):
+                try:
+                    self._download(fname, tmp)
+                    exe = _stellar_pick_bin_from_archive(tmp)
+                except Exception as e:
+                    last_err = self._reason(e)
+                    exe = ""
+                finally:
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+                if exe and os.path.isfile(exe) and os.path.getsize(exe) > 512 * 1024:
+                    self.done.emit(exe)
+                    return
+                if exe:  # 解压出来的文件不完整（多半被杀毒软件拦截）
+                    last_err = _t("客户端文件不完整，可能被杀毒软件拦截")
+                    try:
+                        os.remove(exe)
+                    except Exception:
+                        pass
+                if attempt < 2:
+                    time.sleep(1.0 + attempt)
+            self.failed.emit(last_err or _t("客户端解压失败"))
         except Exception as e:
-            self.failed.emit(_err_text(e))
+            self.failed.emit(self._reason(e))
+
+    def _reason(self, e):
+        """下载失败原因：尽量带上 HTTP 状态码 / 文件类型，便于用户反馈。"""
+        name = type(e).__name__
+        if "HTTP" in name:
+            return _t("服务器返回错误") + "（%s）" % str(e)[:80]
+        if "Timeout" in name:
+            return _t("连接超时")
+        if "Connection" in name or "SSL" in name:
+            return _t("网络连接失败")
+        text = str(e)
+        if text and not text.startswith("<"):
+            return text[:120]
+        return _err_text(e)
+
+    def _resolve_name(self):
+        """先从资源站列表接口取文件名，失败时用内置兜底文件名。"""
+        import requests
+        try:
+            r = requests.get(STELLAR_FRPC_LIST_URL, headers={"User-Agent": STELLAR_FRPC_UA},
+                             timeout=(10, 30))
+            data = r.json()
+            if data.get("code") == 200:
+                content = (data.get("data") or {}).get("content") or []
+                names = [c.get("name", "") for c in content if c.get("name")]
+                fname = _stellar_pick_frpc_file(names)
+                if fname:
+                    return fname
+        except Exception:
+            pass
+        return _stellar_default_frpc_name()
+
+    def _download(self, fname, dest):
+        """下载并校验客户端压缩包；HTML 反爬页会被识别为失败。"""
+        import requests
+        base = STELLAR_FRPC_DL_BASE + "/" + fname
+        last = ""
+        for url in (base + "?download=1", base):
+            try:
+                with requests.get(url, stream=True, timeout=(10, 60),
+                                  headers={"User-Agent": STELLAR_FRPC_UA}) as r:
+                    r.raise_for_status()
+                    total = int(r.headers.get("Content-Length") or 0)
+                    got = 0
+                    with open(dest, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            got += len(chunk)
+                            if total:
+                                self.progress.emit(min(100, int(got * 100 / total)))
+                with open(dest, "rb") as f:
+                    magic = f.read(2)
+                if fname.lower().endswith(".zip"):
+                    ok = magic == b"PK"
+                else:
+                    ok = magic == b"\x1f\x8b"
+                if ok and got > 512 * 1024:
+                    return
+                if not ok:
+                    last = _t("下载被服务器拦截，请稍后重试")
+                else:
+                    last = _t("下载的文件不完整，请稍后重试")
+            except Exception as e:
+                last = self._reason(e)
+        raise RuntimeError(last or _t("下载失败"))
 
 
 class StellarTunnelsThread(QThread):
@@ -12495,6 +12613,10 @@ class MultiplayerPage(Page):
         self._frpc = None
         self._frpc_exe = ""
         self._tunnels = []
+        self._active_link = ""
+        self._active_port = 0
+        self._active_tid = None
+        self._relogin_tried = False
         self._login_thread = None
         self._info_thread = None
         self._tunnel_thread = None
@@ -13226,7 +13348,7 @@ class MultiplayerPage(Page):
             self.stellar_log.append(_t("客户端已就绪：") + path)
             if auto_tid is not None:
                 self._start_frpc(path, load_config().get("stellar_token", ""),
-                                 auto_tid)
+                                 auto_tid, self._active_link, self._active_port)
 
         def on_fail(msg):
             self.frpc_bar.pack_forget()
@@ -13258,26 +13380,98 @@ class MultiplayerPage(Page):
             alert(self, _t("提示"), _t("隧道数据异常，请刷新重试。"), "warn")
             return
         exe = self._frpc_exe or _stellar_frpc_exe()
+        self._relogin_tried = False
         if exe and os.path.isfile(exe):
             self._frpc_exe = exe
-            self._start_frpc(exe, token, tid)
+            self._start_frpc(exe, token, tid, t.get("Link") or "",
+                             t.get("LocalPort") or 0)
             return
         self.stellar_log.append(_t("未检测到客户端，正在自动下载..."))
+        self._active_tid = tid
+        self._active_link = t.get("Link") or ""
+        try:
+            self._active_port = int(t.get("LocalPort") or 0)
+        except Exception:
+            self._active_port = 0
         self._stellar_download_frpc(tid)
 
-    def _start_frpc(self, exe, token, tid):
+    def _start_frpc(self, exe, token, tid, link="", port=0):
         if self._frpc is not None and self._frpc.isRunning():
             self.stellar_log.append(_t("已有隧道正在运行，请先断开连接。"))
             return
+        self._active_tid = tid
+        self._active_link = link or ""
+        try:
+            self._active_port = int(port or 0)
+        except Exception:
+            self._active_port = 0
         self.stellar_log.append(_t("正在连接隧道 ..."))
         self.stellar_status.configure(text=_t("正在连接隧道 ..."))
         proc = StellarFrpcProcess(exe, token, tid)
         self._frpc = proc
-        proc.output.connect(lambda s: self.stellar_log.append(s))
-        proc.finished_code.connect(self._frpc_finished)
+        proc.output.connect(self._on_frpc_output)
+        proc.finished_code.connect(
+            lambda c, o, p=proc: self._frpc_finished(c, o, p))
         proc.start()
 
-    def _frpc_finished(self, code, out):
+    def _on_frpc_output(self, s):
+        """转发客户端输出，并在隧道真正启动后提示好友可用的公网地址。"""
+        self.stellar_log.append(s)
+        low = s.lower()
+        if "隧道启动成功" in s or "start proxy success" in low:
+            link = self._active_link
+            if link:
+                self.stellar_status.configure(text=_t("隧道已连接：") + link)
+                self.stellar_log.append(_t("好友可连接地址：") + link)
+            else:
+                self.stellar_status.configure(text=_t("隧道已连接"))
+            if self._active_port and not _port_open("127.0.0.1", self._active_port):
+                self.stellar_log.append(
+                    _t("本地 %d 端口未监听：请先在游戏里「对局域网开放」。")
+                    % self._active_port)
+        elif ("无效的token" in low or "无效token" in low
+              or "invalid token" in low):
+            self._try_relogin()
+
+    def _try_relogin(self):
+        """Token 失效时用已保存的账号密码自动重新登录并重连一次。"""
+        if self._relogin_tried:
+            self.stellar_status.configure(text=_t("登录已过期，请重新登录"))
+            return
+        c = load_config()
+        acc = (c.get("stellar_account") or "").strip()
+        pwd = c.get("stellar_password") or ""
+        if not acc or not pwd:
+            self.stellar_status.configure(text=_t("登录已过期，请重新登录"))
+            return
+        self._relogin_tried = True
+        self.stellar_log.append(_t("登录已过期，正在重新登录..."))
+        th = StellarLoginThread(acc, pwd)
+        self._relogin_thread = th
+
+        def ok(tok, _account):
+            update_config(stellar_token=tok)
+            self.stellar_log.append(_t("重新登录成功，正在重连隧道 ..."))
+            exe = self._frpc_exe or _stellar_frpc_exe()
+            if exe and self._active_tid is not None:
+                self._frpc = None
+                self._start_frpc(exe, tok, self._active_tid,
+                                 self._active_link, self._active_port)
+            else:
+                self.stellar_status.configure(text=_t("登录已过期，请重新登录"))
+
+        def fail(msg):
+            self.stellar_status.configure(text=_t("登录失败：") + msg)
+            self.stellar_log.append(_t("自动重新登录失败：") + msg)
+
+        th.ok.connect(ok)
+        th.failed.connect(fail)
+        th.start()
+
+    def _frpc_finished(self, code, out, proc=None):
+        # 手动断开 / 自动重连时旧进程的退出信号不再覆盖当前状态
+        if proc is not None and proc is not self._frpc:
+            return
         if code == StellarFrpcProcess.PROBE_FAILED:
             self.stellar_log.append(_t("客户端无法运行：") + str(out))
             self.stellar_status.configure(text=_t("连接失败"))
@@ -13295,6 +13489,7 @@ class MultiplayerPage(Page):
             except Exception:
                 pass
         self._frpc = None
+        self._relogin_tried = True  # 手动断开后不再自动重连
         self.stellar_log.append(_t("已断开隧道连接。"))
         self.stellar_status.configure(text=_t("隧道已停止"))
 
