@@ -912,6 +912,14 @@ _EN = {
         "The downloaded file is incomplete; please retry",
     "客户端文件不完整，可能被杀毒软件拦截":
         "The client file is incomplete; it may have been blocked by antivirus software",
+    "扫描超时：未找到可联机的局域网世界。":
+        "Scan timed out: no joinable LAN world was found.",
+    "没有找到局域网世界：请先进入存档并「对局域网开放」，再点击「创建房间」。":
+        "No LAN world found. Enter a save and choose \"Open to LAN\" first, then click \"Create room\".",
+    "创建房间失败：请确认陶瓦客户端状态正常后重试。":
+        "Failed to create a room. Check the Terracotta client status and retry.",
+    "加入房间失败：房间码无效或房主已关闭房间。":
+        "Failed to join: the room code is invalid or the host closed the room.",
     "隧道已连接：": "Tunnel connected: ",
     "隧道已连接": "Tunnel connected",
     "好友可连接地址：": "Address for friends: ",
@@ -5198,6 +5206,10 @@ class TerraStartThread(QThread):
         try:
             if os.path.exists(self._port_file):
                 os.remove(self._port_file)
+            try:
+                os.makedirs(TERRA_DIR, exist_ok=True)
+            except Exception:
+                pass
             kw = {}
             if os.name == "nt":
                 kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW，避免弹出黑窗
@@ -12622,6 +12634,9 @@ class MultiplayerPage(Page):
         self._tunnel_thread = None
         self._stellar_refreshing = 0
         self._terra_port = None
+        self._terra_state_name = ""
+        self._terra_hint = ""
+        self._scan_timer = None
         self._ctl_thread = None
         self._build_ui()
         self._refresh_terra()
@@ -12849,13 +12864,20 @@ class MultiplayerPage(Page):
         if not exe:
             alert(self, _t("提示"), _t("请先下载陶瓦客户端。"), "warn")
             return
+        if self._terra_port and self._state_thread is not None:
+            return  # 已经在运行，避免重复启动第二个实例
+        self.terra_start_btn.setEnabled(False)
         self._terra_set_status(_t("正在启动陶瓦联机 ..."), "text2")
         th = TerraStartThread(exe, _dp("terracotta_port.json"))
         self._task = th
-        th.done.connect(self._terra_started)
-        th.failed.connect(lambda m: self._terra_set_status(
-            _t("启动失败：") + m, "red1", "warn", "red1"))
+        # 信号名是 ok(port)，之前误写成 done 导致点击启动没有任何反应
+        th.ok.connect(self._terra_started)
+        th.failed.connect(self._terra_start_failed)
         th.start()
+
+    def _terra_start_failed(self, msg):
+        self.terra_start_btn.setEnabled(True)
+        self._terra_set_status(_t("启动失败：") + msg, "red1", "warn", "red1")
 
     def _terra_started(self, port):
         self._terra_port = int(port)
@@ -12875,6 +12897,13 @@ class MultiplayerPage(Page):
         """陶瓦进程已退出（连续轮询失败）。"""
         self._state_thread = None
         self._terra_port = None
+        self._terra_state_name = ""
+        if self._scan_timer is not None:
+            try:
+                self.after_cancel(self._scan_timer)
+            except Exception:
+                pass
+            self._scan_timer = None
         self.terra_room.configure(text=_t("尚未联机"), fg=C("muted"))
         self.terra_players.configure(text="")
         self.terra_copy_btn.setEnabled(False)
@@ -12886,8 +12915,42 @@ class MultiplayerPage(Page):
                                "red1", "warn", "red1")
 
     # ---- 房间状态机 ----
+    def _terra_track_state(self, state):
+        """跟踪状态变化；扫描阶段加超时，避免陶瓦一直停在扫描/等待。"""
+        if state == self._terra_state_name:
+            return
+        self._terra_state_name = state
+        if self._scan_timer is not None:
+            try:
+                self.after_cancel(self._scan_timer)
+            except Exception:
+                pass
+            self._scan_timer = None
+        if state == "host-scanning":
+            self._scan_timer = self.after(90000, self._terra_scan_timeout)
+
+    def _terra_scan_timeout(self):
+        self._scan_timer = None
+        if self._terra_state_name != "host-scanning":
+            return
+        self.terra_log.append(_t("扫描超时：未找到可联机的局域网世界。"))
+        # 让陶瓦回到待机，避免一直卡在“扫描中”
+        self._terra_control("/state/ide")
+        self._terra_hint = _t("没有找到局域网世界：请先进入存档并"
+                              "「对局域网开放」，再点击「创建房间」。")
+        self._terra_set_status(self._terra_hint, "red1", "warn", "red1")
+        self._terra_set_room_actions(True)
+        self.after(6000, self._clear_terra_hint)
+
+    def _clear_terra_hint(self):
+        self._terra_hint = ""
+        if self._terra_state_name == "waiting":
+            self._terra_set_status(_t("待机中：可创建房间或输入房间码加入。"),
+                                   "text2", "dot", "teal")
+
     def _terra_state(self, d):
         state = (d.get("state") or "").strip()
+        self._terra_track_state(state)
         room = d.get("room") or ""
         profiles = d.get("profiles") or []
         if room:
@@ -12901,8 +12964,9 @@ class MultiplayerPage(Page):
         else:
             self.terra_players.configure(text="")
         if state == "waiting":
-            self._terra_set_status(_t("待机中：可创建房间或输入房间码加入。"),
-                                   "text2", "dot", "teal")
+            if not self._terra_hint:
+                self._terra_set_status(_t("待机中：可创建房间或输入房间码加入。"),
+                                       "text2", "dot", "teal")
             self._terra_set_room_actions(True)
         elif state == "host-scanning":
             self._terra_set_status(_t("正在扫描本机 Minecraft 端口：请进入存档并"
@@ -12918,8 +12982,11 @@ class MultiplayerPage(Page):
                                    "teal", "dot", "teal")
             self._terra_set_room_actions(False)
         elif state in ("guest-connecting", "guest-starting"):
-            diff = d.get("difficulty")
-            extra = ("（NAT 难度：%s）" % diff) if diff else ""
+            diff = str(d.get("difficulty") or "").upper()
+            diff_names = {"UNKNOWN": _t("未知"), "EASIEST": _t("简单"),
+                          "SIMPLE": _t("较简单"), "MEDIUM": _t("中等"),
+                          "TOUGH": _t("较难")}
+            extra = ("（NAT 难度：%s）" % diff_names.get(diff, diff)) if diff else ""
             self._terra_set_status(_t("正在加入房间 ...") + extra, "yellow",
                                    "dot", "yellow")
             self._terra_set_room_actions(False)
@@ -12943,7 +13010,7 @@ class MultiplayerPage(Page):
                                    "red1", "warn", "red1")
             self._terra_set_room_actions(False)
 
-    def _terra_control(self, path, params=None, on_done=None):
+    def _terra_control(self, path, params=None, on_done=None, on_fail=None):
         if not self._terra_port:
             alert(self, _t("提示"), _t("请先启动陶瓦联机。"), "warn")
             return
@@ -12951,7 +13018,13 @@ class MultiplayerPage(Page):
         self._ctl_thread = th
         if on_done:
             th.done.connect(on_done)
-        th.failed.connect(lambda m: self.terra_log.append(str(m)))
+
+        def _failed(m):
+            self.terra_log.append(str(m))
+            if on_fail:
+                on_fail(str(m))
+
+        th.failed.connect(_failed)
         th.start()
 
     def _terra_player_name(self):
@@ -12962,9 +13035,18 @@ class MultiplayerPage(Page):
         return name
 
     def _terra_host(self):
-        self._terra_control("/state/scanning",
-                            {"player": self._terra_player_name()})
+        self._terra_set_room_actions(False)
         self._terra_set_status(_t("正在创建房间 ..."), "yellow", "dot", "yellow")
+
+        def _fail(_m):
+            self._terra_set_status(
+                _t("创建房间失败：请确认陶瓦客户端状态正常后重试。"),
+                "red1", "warn", "red1")
+            self._terra_set_room_actions(True)
+
+        self._terra_control("/state/scanning",
+                            {"player": self._terra_player_name()},
+                            on_fail=_fail)
 
     def _terra_join(self):
         code = normalize_room_code(self.terra_join_var.get())
@@ -12972,14 +13054,30 @@ class MultiplayerPage(Page):
             alert(self, _t("提示"),
                   _t("房间码格式不正确，应形如 U/XXXX-XXXX-XXXX-XXXX。"), "warn")
             return
-        self._terra_control("/state/guesting",
-                            {"room": code, "player": self._terra_player_name()})
+        self._terra_set_room_actions(False)
         self._terra_set_status(_t("正在加入房间 ..."), "yellow", "dot", "yellow")
+
+        def _fail(_m):
+            self._terra_set_status(
+                _t("加入房间失败：房间码无效或房主已关闭房间。"),
+                "red1", "warn", "red1")
+            self._terra_set_room_actions(True)
+
+        self._terra_control("/state/guesting",
+                            {"room": code, "player": self._terra_player_name()},
+                            on_fail=_fail)
 
     def _terra_stop(self):
         if self._state_thread:
             self._state_thread.stop()
             self._state_thread = None
+        self._terra_state_name = ""
+        if self._scan_timer is not None:
+            try:
+                self.after_cancel(self._scan_timer)
+            except Exception:
+                pass
+            self._scan_timer = None
         port = self._terra_port
         self._terra_port = None
         thr = self._task
