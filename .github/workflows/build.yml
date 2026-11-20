@@ -23,24 +23,63 @@ jobs:
           python -m pip install --upgrade pip
           pip install "pyinstaller>=6.3,<7" requests minecraft-launcher-lib send2trash pillow
 
-      - name: Build EXE
+      - name: Build main EXE
         run: pyinstaller --noconfirm --clean LightningCraftLauncher.spec
 
-      - name: Verify bundled runtime DLLs
+      - name: Build DLL fix tool
+        run: pyinstaller --noconfirm --clean DLLFix.spec
+
+      - name: Package runtime DLLs
         shell: pwsh
         run: |
-          pyi-archive_viewer -l dist/LightningCraftLauncher.exe > contents.txt
-          Write-Host "已打进 EXE 的运行时 DLL："
-          Select-String -Path contents.txt -Pattern "vcruntime|msvcp|concrt|ucrtbase|api-ms-win-crt" |
-            ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
-          $need = @("vcruntime140.dll", "ucrtbase.dll")
-          $missing = @($need | Where-Object {
-            -not (Select-String -Path contents.txt -SimpleMatch $_ -Quiet)
-          })
-          if ($missing.Count -gt 0) {
-            Write-Error ("缺少运行时 DLL：" + ($missing -join ", "))
+          $py = (python -c "import sys; print(sys.base_prefix)").Trim()
+          $out = "dist/runtime-dlls"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $patterns = @(
+            "vcruntime140.dll", "vcruntime140_1.dll", "vcruntime140_2.dll",
+            "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+            "msvcp140_atomic_wait.dll", "concrt140.dll", "ucrtbase.dll",
+            "api-ms-win-crt-*.dll"
+          )
+          $dirs = @(
+            $py,
+            (Join-Path $py "DLLs"),
+            (Join-Path $env:SystemRoot "System32"),
+            "C:\Program Files (x86)\Windows Kits\10\Redist\ucrt\DLLs\x64"
+          )
+          $seen = @{}
+          foreach ($d in $dirs) {
+            if (-not (Test-Path $d)) { continue }
+            foreach ($p in $patterns) {
+              Get-ChildItem -Path $d -Filter $p -File -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                  if (-not $seen.ContainsKey($_.Name.ToLower())) {
+                    $seen[$_.Name.ToLower()] = $true
+                    Copy-Item $_.FullName -Destination $out -Force
+                  }
+                }
+            }
+          }
+          Write-Host ("runtime DLLs collected: " + $seen.Count)
+          if ($seen.Count -lt 2) {
+            Write-Error "运行库收集失败"
             exit 1
           }
+          Compress-Archive -Path (Join-Path $out "*") -DestinationPath "dist/runtime-dlls.zip" -Force
+
+      - name: Verify DLL fix tool bundles runtime
+        shell: pwsh
+        run: |
+          pyi-archive_viewer -l dist/DLLFix.exe > dllfix_contents.txt
+          $need = @("vcruntime140.dll", "ucrtbase.dll")
+          $missing = @($need | Where-Object {
+            -not (Select-String -Path dllfix_contents.txt -SimpleMatch $_ -Quiet)
+          })
+          if ($missing.Count -gt 0) {
+            Write-Error ("DLLFix.exe 缺少运行库：" + ($missing -join ", "))
+            exit 1
+          }
+          Write-Host "DLLFix.exe 已内置运行库"
 
       - name: Show output
         run: dir dist
@@ -48,5 +87,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: LightningCraftLauncher-windows
-          path: dist/LightningCraftLauncher.exe
+          path: |
+            dist/LightningCraftLauncher.exe
+            dist/DLLFix.exe
+            dist/runtime-dlls.zip
           if-no-files-found: error

@@ -3371,7 +3371,10 @@ def _fetch_loader_versions(lid, source):
                     m = re.match(r"^\d+\.\d+", s)
                     if m:
                         # 20.4.237 -> 1.20.4，21.1.72 -> 1.21.1，21.0.x -> 1.21
-                        result.add("1." + m.group(0).removesuffix(".0"))
+                        v = m.group(0)
+                        if v.endswith(".0"):
+                            v = v[:-2]
+                        result.add("1." + v)
                 if result:
                     return result
             except Exception as e:

@@ -1,13 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置。
+"""PyInstaller 打包配置（主程序）。
 
-目的：把 VC++ 运行库、通用 C 运行库 (UCRT) 以及第三方依赖自带的 DLL
-一起打进 EXE，避免在缺少运行库的电脑上提示 dll 缺失。
+不再手动收集 VC++ / UCRT 运行库：这些交给系统自带的运行库，
+缺失的机器可运行同版本附带的 DLLFix.exe 或解压 runtime-dlls.zip 补全。
 用法：pyinstaller --noconfirm --clean LightningCraftLauncher.spec
 """
-import glob
 import os
-import sys
 
 from PyInstaller.utils.hooks import collect_all
 
@@ -26,37 +24,6 @@ for _pkg in ("minecraft_launcher_lib", "PIL", "requests", "urllib3",
     datas += _datas
     binaries += _binaries
     hiddenimports += _hidden
-
-# 最容易缺失的微软运行时 DLL。
-_DLL_PATTERNS = (
-    "vcruntime140.dll", "vcruntime140_1.dll", "vcruntime140_2.dll",
-    "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
-    "concrt140.dll", "ucrtbase.dll", "api-ms-win-crt-*.dll",
-)
-_DLL_DIRS = (
-    sys.base_prefix,
-    os.path.join(sys.base_prefix, "DLLs"),
-    os.path.join(sys.base_prefix, "Library", "bin"),
-    os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32"),
-)
-
-_seen = set()
-for _dir in _DLL_DIRS:
-    if not os.path.isdir(_dir):
-        continue
-    for _pattern in _DLL_PATTERNS:
-        for _path in sorted(glob.glob(os.path.join(_dir, _pattern))):
-            _name = os.path.basename(_path)
-            if _name.lower() in _seen:
-                continue
-            _seen.add(_name.lower())
-            binaries.append((_path, "."))
-
-if _seen:
-    # 保持纯 ASCII 输出：Windows 运行器 stdout 为 cp1252，中文会导致 UnicodeEncodeError
-    print("[spec] runtime DLLs: %s" % ", ".join(sorted(_seen)))
-else:
-    print("[spec] WARNING: no runtime DLLs found; please build on Windows.")
 
 a = Analysis(
     [ENTRY],
