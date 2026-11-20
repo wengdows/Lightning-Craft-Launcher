@@ -211,7 +211,7 @@ details p{margin-top:10px;color:var(--muted);font-size:14px}
           </a>
           <a class="btn btn-ghost" href="https://github.com/wengdows/Lightning-Craft-Launcher" target="_blank" rel="noopener">GitHub 仓库</a>
         </div>
-        <p class="meta">Windows 10 / 11 · 64 位 · 下载即用 · 已内置运行库，告别 DLL 缺失</p>
+        <p class="meta">Windows 10 / 11 · 64 位 · 单文件 EXE · 体积精简 · 附运行库补全工具</p>
         <p class="meta">作者：wengdows · <a href="https://space.bilibili.com/3546718595451750" target="_blank" rel="noopener" style="color:var(--accent)">B 站主页</a></p>
       </div>
     </div>
@@ -259,7 +259,7 @@ details p{margin-top:10px;color:var(--muted);font-size:14px}
           <p class="dl-date" id="dl-date">发布于 GitHub Releases</p>
           <ul class="dl-notes">
             <li>Windows 10 / 11（64 位），单文件 EXE，双击即用</li>
-            <li>已打包 Python 与 VC++ / UCRT 运行库，无需额外安装环境</li>
+            <li>主程序已精简，不再内嵌运行库，体积更小</li>
             <li>若 SmartScreen 提示，请选择「仍要运行」</li>
             <li>更新方式：「关于」页检查更新，或下载新版覆盖旧文件</li>
           </ul>
@@ -275,6 +275,30 @@ details p{margin-top:10px;color:var(--muted);font-size:14px}
           <p class="dl-tip">下载来源为 GitHub 仓库 Releases，国内访问较慢时请耐心等待。</p>
         </div>
       </div>
+
+      <div class="dl-card" style="margin-top:22px">
+        <div class="dl-info">
+          <h2>运行库补全工具</h2>
+          <p class="dl-date">独立小工具，仅在提示缺少 DLL 时使用</p>
+          <ul class="dl-notes">
+            <li>报错提示缺少 <code>vcruntime140.dll</code>、<code>api-ms-win-crt-*.dll</code> 时使用</li>
+            <li>把 <code>DLLFix.exe</code> 放到启动器同目录后双击，自动补齐运行库</li>
+            <li>也可下载 <code>runtime-dlls.zip</code>，把其中的 DLL 解压到启动器目录</li>
+            <li>补全后重新打开 LCL 即可，无需重装</li>
+          </ul>
+        </div>
+        <div class="dl-actions">
+          <a class="btn btn-primary"
+             href="https://github.com/wengdows/Lightning-Craft-Launcher/releases/latest/download/DLLFix.exe"
+             target="_blank" rel="noopener">下载 DLLFix.exe</a>
+          <a class="btn btn-ghost"
+             href="https://github.com/wengdows/Lightning-Craft-Launcher/releases/latest/download/runtime-dlls.zip"
+             target="_blank" rel="noopener">下载 runtime-dlls.zip</a>
+          <p class="dl-tip">仅 Windows 需要；正常能启动的用户无需下载。</p>
+        </div>
+      </div>
+
+      <p class="dl-tip" style="margin-top:18px">兼容性：Windows 10 / 11（64 位）。Windows 7 端适配受 Python 运行时限制，正在评估方案。</p>
     </div>
   </section>
 
