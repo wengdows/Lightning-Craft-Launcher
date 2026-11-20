@@ -196,6 +196,14 @@ powershell -NoProfile -Command "$h=@{Authorization='Bearer %TOKEN%';Accept='appl
 echo       上传 %PY_NAME% ...
 powershell -NoProfile -Command "$h=@{Authorization='Bearer %TOKEN%';Accept='application/vnd.github+json'}; try{$r=Invoke-RestMethod -Method Post -Uri ('https://uploads.github.com/repos/%REPO%/releases/%RID%/assets?name=' + [uri]::EscapeDataString('%PY_NAME%')) -Headers $h -ContentType 'application/octet-stream' -InFile ('%TEMP%\%PY_NAME%') -TimeoutSec 600; Write-Output ('OK ' + $r.name + '  ' + [math]::Round($r.size/1KB,1) + ' KB')}catch{Write-Output ('FAIL ' + $_.Exception.Message)}"
 
+rem 附带的可选附件：运行库补全工具与运行库包
+for %%f in (DLLFix.exe runtime-dlls.zip) do (
+  if exist "dist\%%f" (
+    echo       上传 %%f ...
+    powershell -NoProfile -Command "$h=@{Authorization='Bearer %TOKEN%';Accept='application/vnd.github+json'}; try{$r=Invoke-RestMethod -Method Post -Uri ('https://uploads.github.com/repos/%REPO%/releases/%RID%/assets?name=' + [uri]::EscapeDataString('%%f')) -Headers $h -ContentType 'application/octet-stream' -InFile ((Resolve-Path -LiteralPath 'dist\%%f').Path) -TimeoutSec 900; Write-Output ('OK ' + $r.name + '  ' + [math]::Round($r.size/1MB,1) + ' MB')}catch{Write-Output ('FAIL ' + $_.Exception.Message)}"
+  )
+)
+
 echo.
 echo ============================================================
 echo   发布完成
