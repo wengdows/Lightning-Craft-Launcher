@@ -53,9 +53,10 @@ for _dir in _DLL_DIRS:
             binaries.append((_path, "."))
 
 if _seen:
-    print("[spec] 已打包的运行时 DLL: %s" % ", ".join(sorted(_seen)))
+    # 保持纯 ASCII 输出：Windows 运行器 stdout 为 cp1252，中文会导致 UnicodeEncodeError
+    print("[spec] runtime DLLs: %s" % ", ".join(sorted(_seen)))
 else:
-    print("[spec] 警告：未找到任何运行时 DLL，请在 Windows 上执行打包。")
+    print("[spec] WARNING: no runtime DLLs found; please build on Windows.")
 
 a = Analysis(
     [ENTRY],
