@@ -13624,17 +13624,29 @@ def version_newer(latest, current):
 
 
 def _pick_update_asset(assets):
-    """按运行方式选择更新包：源码运行优先 .py，打包运行优先 .exe。"""
+    """按运行方式选择更新包：源码运行优先 .py，打包运行优先 .exe。
+    排除 DLLFix / runtime-dlls 这类附带工具，只选启动器主程序，避免
+    把运行库补全工具误当成最新版下载。"""
     prefer = ((".exe", ".py", ".zip") if getattr(sys, "frozen", False)
               else (".py", ".exe", ".zip"))
 
+    def is_sidecar(a):
+        name = str(a.get("name") or "").lower()
+        return "dllfix" in name or name.startswith("runtime-dlls")
+
     def rank(a):
         name = str(a.get("name") or "").lower()
+        # 主程序 exe 排到最前，避免选到附带的 DLLFix.exe
+        if "lightningcraftlauncher" in name:
+            base = -1
+        else:
+            base = 0
         for i, ext in enumerate(prefer):
             if name.endswith(ext):
-                return i
+                return base + i
         return 9
-    usable = [a for a in assets if a.get("browser_download_url")]
+    usable = [a for a in assets
+              if a.get("browser_download_url") and not is_sidecar(a)]
     return sorted(usable, key=rank)[0] if usable else None
 
 

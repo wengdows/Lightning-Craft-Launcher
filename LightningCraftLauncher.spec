@@ -1,8 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置（主程序）。
 
-不再手动收集 VC++ / UCRT 运行库：这些交给系统自带的运行库，
-缺失的机器可运行同版本附带的 DLLFix.exe 或解压 runtime-dlls.zip 补全。
+不再手动收集 VC++ / UCRT 运行库，直接用系统自带的。
 用法：pyinstaller --noconfirm --clean LightningCraftLauncher.spec
 """
 import os
