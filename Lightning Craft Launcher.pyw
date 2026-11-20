@@ -14152,7 +14152,7 @@ class MainWindow(tk.Tk):
         logo.pack(fill="x")
         logo.pack_propagate(False)
         IconCanvas(logo, "bolt", "accent", 26, bg="panel").pack(pady=(16, 2))
-        tk.Label(logo, text="Lightning Craft", bg=C("panel"), fg=C("text"),
+        tk.Label(logo, text="LCL", bg=C("panel"), fg=C("text"),
                  font=F(11, True)).pack()
         self.nav_items = {}
         for key, icon, label in PAGE_DEFS:
