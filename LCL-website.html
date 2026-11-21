@@ -211,7 +211,7 @@ details p{margin-top:10px;color:var(--muted);font-size:14px}
           </a>
           <a class="btn btn-ghost" href="https://github.com/wengdows/Lightning-Craft-Launcher" target="_blank" rel="noopener">GitHub 仓库</a>
         </div>
-        <p class="meta">支持 Win10 / 11（64 位）· 单文件 EXE · 不带运行库，更轻量 · 附运行库补全工具</p>
+        <p class="meta">支持 Win10 / 11（64 位）· 单文件 EXE · 不带运行库，更轻量</p>
         <p class="meta">作者：wengdows · <a href="https://space.bilibili.com/3546718595451750" target="_blank" rel="noopener" style="color:var(--accent)">B 站主页</a></p>
       </div>
     </div>
@@ -259,7 +259,7 @@ details p{margin-top:10px;color:var(--muted);font-size:14px}
           <p class="dl-date" id="dl-date">发布于 GitHub Releases</p>
           <ul class="dl-notes">
             <li>支持 Win10 / 11（64 位），单文件 exe，双击就能跑</li>
-            <li>主程序去掉了内嵌运行库，体积小了不少</li>
+            <li>绿色单文件，不写注册表，不想用了直接删 exe</li>
             <li>SmartScreen 要是弹警告，选「仍要运行」就行</li>
             <li>更新：去「关于」里检查更新，或者下个新版覆盖旧的</li>
           </ul>
@@ -273,28 +273,6 @@ details p{margin-top:10px;color:var(--muted);font-size:14px}
           <a class="btn btn-ghost" href="https://github.com/wengdows/Lightning-Craft-Launcher/releases" target="_blank" rel="noopener">全部版本</a>
           <a class="btn btn-ghost" href="https://github.com/wengdows/Lightning-Craft-Launcher/blob/main/Lightning%20Craft%20Launcher.py" target="_blank" rel="noopener">查看源码</a>
           <p class="dl-tip">文件放在 GitHub Releases，国内网可能慢一点，多等等。</p>
-        </div>
-      </div>
-
-      <div class="dl-card" style="margin-top:22px">
-        <div class="dl-info">
-          <h2>运行库补全工具</h2>
-          <p class="dl-date">就一个小工具，只在提示缺 DLL 的时候用</p>
-          <ul class="dl-notes">
-            <li>报缺少 <code>vcruntime140.dll</code>、<code>api-ms-win-crt-*.dll</code> 这类错的时候用</li>
-            <li>把 <code>DLLFix.exe</code> 丢到启动器同一个文件夹里双击，会自动补上运行库</li>
-            <li>或者下 <code>runtime-dlls.zip</code>，把里面的 DLL 解压到启动器目录也行</li>
-            <li>弄完重开 LCL 就好，不用重装</li>
-          </ul>
-        </div>
-        <div class="dl-actions">
-          <a class="btn btn-primary"
-             href="https://github.com/wengdows/Lightning-Craft-Launcher/releases/latest/download/DLLFix.exe"
-             target="_blank" rel="noopener">下载 DLLFix.exe</a>
-          <a class="btn btn-ghost"
-             href="https://github.com/wengdows/Lightning-Craft-Launcher/releases/latest/download/runtime-dlls.zip"
-             target="_blank" rel="noopener">下载 runtime-dlls.zip</a>
-          <p class="dl-tip">只有 Windows 才需要；能正常启动的就不用下了。</p>
         </div>
       </div>
 
@@ -343,9 +321,15 @@ details p{margin-top:10px;color:var(--muted);font-size:14px}
     var tag = rel.tag_name || FALLBACK_VERSION;
     if (tag.charAt(0) !== "v") tag = "v" + tag;
 
-    var exe = (rel.assets || []).filter(function (a) {
+    var exes = (rel.assets || []).filter(function (a) {
       return /\.exe$/i.test(a.name || "");
-    })[0];
+    });
+    // 只认启动器主程序，别把附带的 DLLFix.exe 当成最新版下了
+    var exe = exes.filter(function (a) {
+      return /lightningcraftlauncher/i.test(a.name || "");
+    })[0] || exes.filter(function (a) {
+      return !/dllfix/i.test(a.name || "");
+    })[0] || exes[0];
     var url = exe ? exe.browser_download_url : LATEST_URL;
 
     setText("dl-hero-text", "下载最新版 " + tag);
