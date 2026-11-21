@@ -1201,6 +1201,29 @@ _EN = {
     "已填入推荐参数，可直接在「JAVA 虚拟机参数」框中微调，完成后点击「应用」保存。":
         "Suggested arguments were filled in. You can fine-tune them in the "
         "JVM arguments field and click Apply to save.",
+    "智能设置": "Smart setup",
+    "智能参数设置": "Smart parameters",
+    "先探测电脑配置，再拖滑条定内存":
+        "Detects your hardware first, then drag the bar to set memory",
+    "CPU %d 核": "CPU: %d cores",
+    "物理内存 %d GB": "RAM: %d GB",
+    "Java %d": "Java %d",
+    "Java %d（32 位）": "Java %d (32-bit)",
+    "Java 未检测到": "Java not detected",
+    "当前版本：%s": "Current version: %s",
+    "模组/整合包，%d 个模组": "Modded, %d mods",
+    "最大内存 (-Xmx)": "Max heap (-Xmx)",
+    "最终参数": "Final arguments",
+    "建议 %d MB，约占物理内存 %d%%":
+        "Suggested %d MB, about %d%% of physical RAM",
+    "已接近可用上限，再大容易卡顿":
+        "Close to the safe limit; going higher may cause stutter",
+    "32 位 Java 最多只能用到 1 GB 左右":
+        "32-bit Java can only use about 1 GB",
+    "自动填写建议值": "Fill suggested",
+    "填入当前参数": "Use this value",
+    "将写入「内存管理」": "Will be written to Memory",
+    "将写入「JVM 参数」": "Will be written to JVM arguments",
     # ===== 主导航 / 通用 =====
     "游戏": "Game",
     "微软登录": "Microsoft Sign-in",
@@ -6614,6 +6637,84 @@ class Page(tk.Frame):
 OVERLAY_BG = "#d9d9d9"  # 浮层显示时四周的淡灰色遮罩
 
 
+class MemSlider(tk.Canvas):
+    """自绘的内存滑条：拖动、点击、滚轮都能调，配色跟随主题。"""
+
+    def __init__(self, parent, lo=1024, hi=8192, step=256, value=2048,
+                 command=None):
+        super().__init__(parent, height=40, bg=C("bg"),
+                         highlightthickness=0, bd=0, cursor="hand2")
+        self.lo = int(lo)
+        self.step = int(step)
+        self.hi = max(int(hi), self.lo + self.step)
+        self.value = self._snap(value)
+        self._cmd = command
+        self._dragging = False
+        self.bind("<Configure>", lambda e: self._redraw())
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "_dragging", False))
+        self.bind("<MouseWheel>",
+                  lambda e: self._nudge(1 if e.delta > 0 else -1))
+        self.bind("<Button-4>", lambda e: self._nudge(1))
+        self.bind("<Button-5>", lambda e: self._nudge(-1))
+
+    def _snap(self, v):
+        v = min(self.hi, max(self.lo, int(v)))
+        return self.lo + int(round((v - self.lo) / float(self.step))) * self.step
+
+    def set(self, v, notify=True):
+        v = self._snap(v)
+        if v == self.value:
+            return
+        self.value = v
+        self._redraw()
+        if notify and self._cmd:
+            self._cmd(v)
+
+    def _value_at(self, x):
+        pad = 18
+        w = max(1, self.winfo_width() - pad * 2)
+        ratio = min(1.0, max(0.0, (x - pad) / float(w)))
+        return self.lo + ratio * (self.hi - self.lo)
+
+    def _on_press(self, e):
+        self._dragging = True
+        self.set(self._value_at(e.x))
+
+    def _on_drag(self, e):
+        if self._dragging:
+            self.set(self._value_at(e.x))
+
+    def _nudge(self, d):
+        self.set(self.value + d * self.step)
+
+    def _redraw(self):
+        try:
+            self.delete("all")
+            w = self.winfo_width() or 240
+            h = 40
+            pad = 18
+            cy = 16
+            ratio = ((self.value - self.lo) / float(self.hi - self.lo)
+                     if self.hi > self.lo else 0)
+            knobs = pad + (w - pad * 2) * ratio
+            _rounded_rect(self, pad, cy - 3, w - pad, cy + 3, 3,
+                          _resolve("card"))
+            if knobs > pad:
+                _rounded_rect(self, pad, cy - 3, knobs, cy + 3, 3,
+                              _resolve("accent"))
+            self.create_oval(knobs - 8, cy - 8, knobs + 8, cy + 8,
+                             fill=_resolve("accent"), outline=_resolve("bg"),
+                             width=2)
+            self.create_text(pad, h - 6, text="%dM" % self.lo,
+                             fill=_resolve("muted"), font=F(9), anchor="w")
+            self.create_text(w - pad, h - 6, text="%dM" % self.hi,
+                             fill=_resolve("muted"), font=F(9), anchor="e")
+        except Exception:
+            pass
+
+
 class BaseDialog(tk.Frame):
     """应用内浮层窗口：覆盖在主界面最上层，四周为淡灰色遮罩。"""
 
@@ -6794,6 +6895,139 @@ def ask_multi_choice(parent, title, prompt, items, checked=True):
                   (_t("确定"), _ok, True)])
     d.show()
     return d.result
+
+
+class JvmTuneDialog(BaseDialog):
+    """智能参数：先探测电脑配置，再拖滑条定内存，实时给出最终参数。"""
+
+    def __init__(self, parent, version, mc_dir, java_path="", target="jvm"):
+        super().__init__(parent, _t("智能参数设置"), width=560)
+        self._version = version
+        self._java = java_path
+        self._auto = compute_auto_memory(version, mc_dir, java_path)
+        self._java_major = java_major_from_path(java_path) if java_path else 0
+        self._bits32 = java_is_32bit(java_path)
+        self.result = None
+
+        total_gb = total_memory_gb()
+        total_mb = (total_gb * 1024) or 8192
+        core = os.cpu_count() or 0
+
+        # ---- 一台机器一套范围：64 位最多给到物理内存的 70% ----
+        if self._bits32:
+            lo, hi, step = 512, 1024, 128
+        else:
+            lo, step = 1024, 256
+            hi = min(int(total_mb * 0.7), 16384)
+            hi = max(hi, self._auto["xmx"] + 1024, lo + 1024)
+        self._lo, self._hi, self._step = lo, hi, step
+        self._recommended = min(max(self._auto["xmx"], lo), hi)
+
+        # ---- 硬件信息 ----
+        info = tk.Frame(self._body, bg=C("card"))
+        info.pack(fill="x", pady=(0, 10))
+        parts = []
+        if core:
+            parts.append(_t("CPU %d 核") % core)
+        if total_gb:
+            parts.append(_t("物理内存 %d GB") % total_gb)
+        if self._java_major:
+            parts.append((_t("Java %d（32 位）") % self._java_major)
+                         if self._bits32
+                         else (_t("Java %d") % self._java_major))
+        else:
+            parts.append(_t("Java 未检测到"))
+        head = " · ".join(parts)
+        tk.Label(info, text=head, bg=C("card"), fg=C("text"), font=F(12),
+                 anchor="w", justify="left").pack(fill="x", padx=14, pady=(10, 2))
+        kind = ((_t("模组/整合包，%d 个模组") % self._auto["mods"])
+                if self._auto.get("modded") else _t("原版"))
+        tk.Label(info, text=_t("当前版本：%s") % kind, bg=C("card"),
+                 fg=C("muted"), font=F(11), anchor="w").pack(fill="x", padx=14,
+                                                             pady=(0, 10))
+
+        # ---- 内存滑条 ----
+        top = tk.Frame(self._body, bg=C("bg"))
+        top.pack(fill="x")
+        tk.Label(top, text=_t("最大内存 (-Xmx)"), bg=C("bg"), fg=C("text"),
+                 font=F(13), anchor="w").pack(side="left")
+        self._val = tk.Label(top, text="", bg=C("bg"), fg=C("accent"),
+                             font=F(13, True), anchor="e")
+        self._val.pack(side="right")
+
+        self.slider = MemSlider(self._body, lo=lo, hi=hi, step=step,
+                                value=self._recommended,
+                                command=self._on_slide)
+        self.slider.pack(fill="x", pady=(2, 0))
+
+        self._hint_lb = tk.Label(self._body, text="", bg=C("bg"),
+                                 fg=C("muted"), font=F(10), anchor="w")
+        self._hint_lb.pack(fill="x", pady=(0, 8))
+
+        # ---- 最终参数预览 ----
+        tk.Label(self._body, text=_t("最终参数"), bg=C("bg"), fg=C("text2"),
+                 font=F(11), anchor="w").pack(fill="x")
+        self._preview = tk.Text(
+            self._body, height=3, bg=C("panel"), fg=C("text"), font=F(12, mono=True),
+            bd=0, highlightthickness=1, highlightbackground=C("border"),
+            highlightcolor=C("border"), padx=10, pady=8, wrap="word",
+            insertwidth=0, cursor="arrow")
+        self._preview.pack(fill="x", pady=(4, 6))
+        self._preview.configure(state="disabled")
+
+        self._target_lb = tk.Label(
+            self._body,
+            text=(_t("将写入「内存管理」") if target == "memory"
+                  else _t("将写入「JVM 参数」")),
+            bg=C("bg"), fg=C("accent2"), font=F(10), anchor="w")
+        self._target_lb.pack(fill="x")
+
+        self._refresh()
+
+        d = self
+        d.button_row([
+            (_t("取消"), lambda: (setattr(d, "result", None), d.destroy()), False),
+            (_t("自动填写建议值"), d._use_suggested, False),
+            (_t("填入当前参数"), d._use_current, True),
+        ])
+
+    # ---------- 交互 ----------
+    def _on_slide(self, _v=None):
+        self._refresh()
+
+    def _use_suggested(self):
+        self.slider.set(self._recommended, notify=False)
+        self._refresh()
+        self._use_current()
+
+    def _use_current(self):
+        self.result = int(self.slider.value)
+        self.destroy()
+
+    def _args_text(self, xmx):
+        xms = max(512, xmx // 2)
+        if auto_gc_mode(self._java_major, xmx) == "zgc":
+            flags = "-XX:+UseZGC"
+        else:
+            flags = "-XX:+UseG1GC -XX:MaxGCPauseMillis=100"
+        return "-Xmx%dM -Xms%dM %s" % (xmx, xms, flags)
+
+    def _refresh(self):
+        xmx = self.slider.value
+        self._val.configure(text="%d MB（%.1f GB）" % (xmx, xmx / 1024.0))
+        total_mb = (total_memory_gb() * 1024) or 8192
+        pct = int(round(self._recommended * 100.0 / total_mb))
+        tip = _t("建议 %d MB，约占物理内存 %d%%") % (self._recommended, pct)
+        if xmx >= self._hi:
+            tip += "  " + _t("已接近可用上限，再大容易卡顿")
+        if self._bits32:
+            tip += "  " + _t("32 位 Java 最多只能用到 1 GB 左右")
+        self._hint_lb.configure(text=tip)
+        txt = self._args_text(xmx)
+        self._preview.configure(state="normal")
+        self._preview.delete("1.0", "end")
+        self._preview.insert("1.0", txt)
+        self._preview.configure(state="disabled")
 
 
 class PathPickerDialog(BaseDialog):
@@ -11871,14 +12105,13 @@ class SettingsPage(Page):
         self.legacy_box = tk.Frame(root, bg=C("bg"))
         self.legacy_box.pack(fill="x")
         self._field(self.legacy_box, _t("JVM 参数"), "jvm_args", "")
-        memo = total_memory_gb()
         row = tk.Frame(self.legacy_box, bg=C("bg"))
         row.pack(fill="x", pady=(0, 10))
-        FlatButton(row, _t("根据内存生成推荐 JVM 参数"), self._recommend_jvm,
+        FlatButton(row, _t("智能设置"), self._recommend_jvm,
                    bg="card", fg="accent", hover="border", padx=12, pady=5,
                    font_size=12).pack(side="left")
-        tk.Label(row, text=_t("检测到系统内存约 %d GB") % memo, bg=C("bg"),
-                 fg=C("muted"), font=F(11)).pack(side="left", padx=8)
+        tk.Label(row, text=_t("先探测电脑配置，再拖滑条定内存"),
+                 bg=C("bg"), fg=C("muted"), font=F(11)).pack(side="left", padx=8)
         self._field(self.legacy_box, _t("额外游戏参数"), "extra_game_args", "")
         self._hint(self.legacy_box,
                    _t("以上为旧版参数，仅在未启用高级参数时生效。"))
@@ -11975,10 +12208,15 @@ class SettingsPage(Page):
             xrow, _t("恢复自动配置"), self._restore_auto_memory, bg="card",
             fg="accent", hover="border", padx=12, pady=4, font_size=11)
         self.btn_auto_mem.pack(side="left")
+        self.btn_tune_mem = FlatButton(
+            xrow, _t("智能设置"),
+            lambda: self._recommend_jvm("memory"), bg="card", fg="accent2",
+            hover="border", padx=12, pady=4, font_size=11)
+        self.btn_tune_mem.pack(side="left", padx=(6, 0))
         self.mem_warn = self._hint(box, "", "yellow")
         self._reg_group("memory", state,
                         [self.mem_mode, self.e_xms, self.e_xmx,
-                         self.btn_auto_mem])
+                         self.btn_auto_mem, self.btn_tune_mem])
 
         # ---------------- 垃圾回收器 ----------------
         box, head, state = self._group(parent, "gc", _t("垃圾回收器"))
@@ -12464,15 +12702,35 @@ class SettingsPage(Page):
         if path:
             var.set(path)
 
-    def _recommend_jvm(self):
-        memo = total_memory_gb()
-        args = recommend_jvm_args("default", memo)
-        if isinstance(args, list):
-            txt = " ".join(args)
+    def _recommend_jvm(self, target="jvm"):
+        """打开智能参数浮层：先探测配置，再让用户拖滑条定内存。"""
+        mc = (self.var_minecraft_directory.get().strip()
+              or DEFAULT_CONFIG["minecraft_directory"])
+        dlg = JvmTuneDialog(self, self._version, mc, self._current_java(),
+                            target=target)
+        xmx = dlg.show()
+        if not xmx:
+            return
+        self._apply_tune(int(xmx))
+
+    def _apply_tune(self, xmx_mb):
+        """把滑条结果写回设置：高级模式写内存项，旧版模式写 JVM 参数。"""
+        xms_mb = max(512, xmx_mb // 2)
+        java_major = java_major_from_path(self._current_java())
+        if auto_gc_mode(java_major, xmx_mb) == "zgc":
+            flags = "-XX:+UseZGC"
         else:
-            txt = str(args)
-        self.var_jvm_args.set(txt)
-        alert(self, _t("推荐 JVM 参数"), _t("已填入推荐参数：\n") + txt)
+            flags = "-XX:+UseG1GC -XX:MaxGCPauseMillis=100"
+        if self.adv_check.isChecked():
+            self.v_xms.set("%dM" % xms_mb)
+            self.v_xmx.set("%dM" % xmx_mb)
+            self.mem_mode.set_current_index(1)
+            self._on_mem_mode(1)
+            self.gc_mode.set_current_index(0)
+        else:
+            self.var_jvm_args.set(
+                "-Xmx%dM -Xms%dM %s" % (xmx_mb, xms_mb, flags))
+        self._refresh_preview()
 
     def _open_mc_dir(self):
         p = self.var_minecraft_directory.get().strip()
