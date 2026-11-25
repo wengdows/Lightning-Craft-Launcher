@@ -823,6 +823,8 @@ _EN = {
     "检查更新（密码:1234）": "Check for updates (password: 1234)",
     "作者：wengdows": "Author: wengdows",
     "作者B站主页": "Author's Bilibili",
+    "开发者：wengdows（策划）· traeAI（代码）":
+        "Developers: wengdows (design) · traeAI (code)",
     # 联机页
     "联机": "Multiplayer",
     "陶瓦联机": "Terracotta",
@@ -14226,6 +14228,8 @@ class AboutPage(Page):
         tk.Label(box, text=_t("一个简洁的 Minecraft 启动器\n支持多账号、模组加载器与联机"),
                  bg=C("bg"), fg=C("text2"), font=F(12),
                  justify="center").pack(pady=(14, 10))
+        tk.Label(box, text=_t("开发者：wengdows（策划）· traeAI（代码）"),
+                 bg=C("bg"), fg=C("muted"), font=F(11)).pack(pady=(0, 12))
         row = tk.Frame(box, bg=C("bg")); row.pack()
         for name, url in ABOUT_LINKS:
             FlatButton(row, name, lambda u=url: webbrowser.open(u), bg="card",
